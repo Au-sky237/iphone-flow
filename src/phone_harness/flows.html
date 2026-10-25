@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SideTap · 流程录制与回放</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101418;color:#e6edf3}*{box-sizing:border-box}body{margin:0}header{padding:18px 24px;border-bottom:1px solid #313b46;display:flex;gap:20px;align-items:center}h1{font-size:19px;margin:0}a{color:#82c4ff}main{display:grid;grid-template-columns:minmax(480px,1fr) 440px;height:calc(100vh - 65px)}iframe{width:100%;height:100%;border:0}aside{padding:22px;overflow:auto;border-left:1px solid #313b46}h2{font-size:16px;margin:24px 0 10px}p,.hint{font-size:13px;line-height:1.6;color:#aebac6}input,textarea,select,button{font:inherit;color:inherit;background:#1a2129;border:1px solid #45515e;border-radius:7px;padding:9px}input,textarea,select{width:100%;margin:6px 0}textarea{font:12px ui-monospace,monospace;resize:vertical;min-height:180px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}.row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}.primary{background:#235e44;border-color:#3c9b70}.danger{border-color:#bd6868}#message{white-space:pre-wrap;line-height:1.5;padding:10px 0;color:#ffd18c}#status{font-size:13px;color:#8be2b2}.step{padding:9px 0;border-bottom:1px solid #313b46;font-size:13px}.failed{color:#ff9e9e}.passed{color:#8be2b2}.step a{margin-left:10px}.param{display:block;font-size:13px}.notice{border-left:3px solid #6b9cca;padding-left:12px}#report{margin-top:10px}@media(max-width:1000px){main{display:block;height:auto}iframe{height:680px}aside{border-left:0;border-top:1px solid #313b46}}
+</style>
+<header><h1>SideTap · 流程录制与回放</h1><a href="/">打开原控制面板</a></header>
+<main>
+<iframe src="/?flow_view=1" title="iPhone 实时控制面板"></iframe>
+<aside>
+<p class="notice">首版录制左侧控制面板中的点击、长按、滑动、文字输入、方向键、主屏幕及打开应用。直接触摸手机和其他 Agent 的操作不会被录制。</p>
+<h2>1. 录制流程</h2>
+<label for="name">流程名称</label><input id="name" value="我的第一个流程" maxlength="120">
+<div class="row"><button id="start" class="primary">开始录制</button><button id="stop" disabled>结束录制</button></div>
+<div id="status" aria-live="polite">正在读取状态…</div>
+<p>开始后在左侧操作。输入文字只在手机执行，流程中保存参数名称；回放前重新填写。请勿录制密码或验证码。请暂停其他 Agent，避免同时控制手机。</p>
+<h2>2. 检查与保存</h2>
+<p>结束录制后可编辑下面的 JSON。可在某一步添加 <code>"expect_text": "预期出现的文字"</code> 作为结果检查。保存前请检查定位文字，可能含有界面上的个人信息。</p>
+<textarea id="editor" aria-label="流程 JSON" spellcheck="false"></textarea>
+<div class="row"><button id="save">保存为新流程</button></div>
+<h2>3. 回放</h2>
+<label for="saved">已保存流程</label><select id="saved"><option value="">选择流程</option></select>
+<div class="row"><button id="load">载入流程</button><button id="refresh">刷新列表</button></div>
+<div id="params"></div>
+<p>先把手机放回录制起点并保持解锁。回放会真实操作手机；请先检查步骤。坐标步骤仅检查应用和尺寸，重要结果请添加文字检查。</p>
+<div class="row"><button id="run" class="primary">回放所选流程</button><button id="cancel" class="danger" disabled>停止回放</button></div>
+<p>停止在当前设备调用返回后生效。动作超时会停止；不会自动重放。每步截图和报告仅保存在本机，可能含个人信息。</p>
+<div id="message" role="alert"></div><div id="report" aria-live="polite"></div>
+</aside>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let state={}, loaded=null, draftSignature='', editMode=false;
+async function api(url,body){const options=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};const response=await fetch(url,options);const data=await response.json();if(!response.ok||data.ok===false||data.error&&!('recording' in data))throw Error(data.error||'请求失败');return data}
+function message(text){$('message').textContent=text}
+function task(fn){return async()=>{try{message('');await fn()}catch(e){message(e.message)}}}
+function list(rows){const old=$('saved').value;const values=JSON.stringify(rows);if($('saved').dataset.values===values)return;$('saved').dataset.values=values;$('saved').replaceChildren(new Option('选择流程',''));for(const row of rows)$('saved').add(new Option(`${row.name} · ${row.steps} 步`,row.id));$('saved').value=old}
+function renderReport(run){$('report').replaceChildren();if(!run)return;const heading=document.createElement('p');heading.textContent=`${run.name}：${({running:'回放中',passed:'检查通过',failed:'已失败',stopped:'已停止'})[run.status]} · ${run.steps.filter(s=>s.status==='passed').length}/${run.total}`;$('report').append(heading);for(const step of run.steps){const row=document.createElement('div');row.className='step '+step.status;row.textContent=`${step.index}. ${step.action} · ${step.status==='passed'?'检查通过':step.status==='failed'?'失败':'执行中'}${step.error?' — '+step.error:''}`;if(step.screenshot){const link=document.createElement('a');link.textContent='截图';link.href=`/api/flows/report/${run.id}/${step.screenshot}`;link.target='_blank';link.rel='noopener';row.append(link)}if(step.screenshot_error)row.append(document.createTextNode(' · '+step.screenshot_error));$('report').append(row)}if(run.error){const err=document.createElement('p');err.className='failed';err.textContent=run.error;$('report').append(err)}if(run.status!=='running'){const link=document.createElement('a');link.href=`/api/flows/report/${run.id}/report.json`;link.textContent='打开执行报告 JSON';link.target='_blank';link.rel='noopener';$('report').append(link)}}
+async function poll(){state=await api('/api/flows');list(state.flows);const running=state.run&&state.run.status==='running';$('status').textContent=state.recording?`正在录制 · ${state.draft.steps.length} 步`:`录制已结束 · ${state.draft.steps.length} 步${state.error?' · '+state.error:''}`;$('start').disabled=state.recording||running;$('stop').disabled=!state.recording;$('save').disabled=state.recording||running;$('run').disabled=state.recording||running||!loaded||loaded.id!==$('saved').value;$('cancel').disabled=!running;const signature=JSON.stringify(state.draft);if(signature!==draftSignature){draftSignature=signature;if(!editMode||state.recording){$('editor').value=JSON.stringify(state.draft,null,2)}}renderReport(state.run)}
+$('editor').addEventListener('input',()=>editMode=true);
+$('saved').addEventListener('change',()=>{loaded=null;$('params').replaceChildren();$('run').disabled=true});
+$('start').onclick=task(async()=>{await api('/api/flows/start',{name:$('name').value});editMode=false;draftSignature='';await poll()});
+$('stop').onclick=task(async()=>{await api('/api/flows/stop',{});editMode=false;draftSignature='';await poll()});
+$('save').onclick=task(async()=>{const result=await api('/api/flows/save',{flow:JSON.parse($('editor').value)});await poll();$('saved').value=result.id;await load();message('已保存。回放前请回到录制起点。')});
+async function load(){const id=$('saved').value;if(!id)throw Error('请先选择流程');const data=await api('/api/flows/get?id='+encodeURIComponent(id));loaded={id,flow:data.flow};editMode=true;$('editor').value=JSON.stringify(data.flow,null,2);$('params').replaceChildren();const parameters=[...new Set(data.flow.steps.filter(s=>s.action==='type').map(s=>s.args.parameter))];for(const name of parameters){const label=document.createElement('label');label.className='param';label.textContent=`输入参数 ${name}`;const input=document.createElement('input');input.dataset.parameter=name;input.type='password';input.autocomplete='off';input.placeholder='本次回放使用的文字';label.append(input);$('params').append(label)}await poll()}
+$('load').onclick=task(load);$('refresh').onclick=task(poll);
+$('run').onclick=task(async()=>{if(!loaded||loaded.id!==$('saved').value)throw Error('请先载入所选流程');if($('editor').value!==JSON.stringify(loaded.flow,null,2))throw Error('编辑内容尚未保存，请先保存并载入');const inputs={};for(const input of $('params').querySelectorAll('input'))inputs[input.dataset.parameter]=input.value;await api('/api/flows/run',{id:loaded.id,inputs});for(const input of $('params').querySelectorAll('input'))input.value='';await poll()});
+$('cancel').onclick=task(async()=>{await api('/api/flows/cancel',{});message('已请求停止，等待当前设备调用返回。');await poll()});
+async function tick(){try{await poll()}catch(e){message('连接失败：'+e.message)}setTimeout(tick,1200)}tick();
+</script>
+</html>

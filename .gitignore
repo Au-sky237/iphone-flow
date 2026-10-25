@@ -1,0 +1,42 @@
+# Local configuration and phone/runtime state
+.env
+.env.*
+!.env.example
+.state/
+**/.state/
+*.log
+*.plist
+*.mobileprovision
+*.p12
+*.pfx
+*.pem
+*.key
+*.ipa
+
+# Python, downloaded tools and build outputs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+test-results.xml
+tools/
+bin/
+wda/
+devimages/
+node_modules/
+dist/
+build/
+
+# Private recordings and generated media
+screenshots/
+recordings/
+reports/
+*.local.json
+.playwright-mcp/
+.playwright-cli/
+.DS_Store
+Thumbs.db

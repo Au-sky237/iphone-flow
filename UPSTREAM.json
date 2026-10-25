@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/ucsandman/SideTap",
+  "revision": "bc43e6f56b199a28c44ca6f696fba42e5f2194a4",
+  "license": "MIT",
+  "snapshot_date": "2026-10-25",
+  "note": "Independent source snapshot with local workflow, localization and connection changes; not an upstream release."
+}

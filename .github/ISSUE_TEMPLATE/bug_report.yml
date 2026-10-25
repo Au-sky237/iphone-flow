@@ -1,0 +1,36 @@
+name: Bug report / 问题反馈
+description: Report a reproducible failure without private phone data.
+body:
+  - type: markdown
+    attributes:
+      value: Do not upload credentials, signing files, device identifiers, or private screenshots. 请勿提交账号、签名文件或私人截图。
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Windows, Python, iOS, device model, WDA and go-ios versions. No device serial numbers.
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Tested against / 测试对象
+      options:
+        - Real iPhone / 真实手机
+        - Simulated device / 模拟设备
+        - Setup only / 仅安装配置
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: Include the starting screen and a minimal synthetic workflow where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and observed result / 预期与实际结果
+    validations:
+      required: true

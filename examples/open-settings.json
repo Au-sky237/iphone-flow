@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "Open Settings — 393 x 852 point example",
+  "steps": [
+    {
+      "action": "open_app",
+      "before": { "app": "com.apple.springboard", "size": [393, 852] },
+      "args": { "bundle": "com.apple.Preferences" },
+      "after_app": "com.apple.Preferences"
+    }
+  ]
+}

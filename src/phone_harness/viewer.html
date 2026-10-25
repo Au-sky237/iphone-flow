@@ -1,0 +1,2635 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SideTap 手机控制</title>
+<style>
+  :root {
+    --bg:#101418; --panel:#1a2129; --panel2:#222b36; --line:#313b46;
+    --text:#e8edf2; --text2:#c4cdd6; --dim:#8a97a5;
+    --ok:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#4493f8;
+    --r1:7px; --r2:10px; --r3:14px;
+    --s1:6px; --s2:10px; --s3:16px; --s4:24px; --s5:32px;
+    --mono:"JetBrains Mono","Cascadia Mono",Consolas,ui-monospace,monospace;
+    --t:120ms ease;
+  }
+  * { box-sizing:border-box; margin:0; }
+  [hidden] { display:none !important; }   /* buttons set display, which would beat the UA rule */
+  /* The page itself never scrolls (wheel belongs to the phone); each pane
+     scrolls internally instead. */
+  html, body { height:100%; overflow:hidden; }
+  body {
+    background:var(--bg);
+    background-image:radial-gradient(1100px 700px at 26% -10%, #151c24 0%, transparent 70%);
+    color:var(--text); font:14px/1.55 Inter,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+    display:flex; justify-content:center; min-height:100vh;
+  }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:var(--bg); }
+  ::-webkit-scrollbar-thumb { background:#2a333d; border-radius:99px; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background:#39434f; }
+
+  /* ---- phone pane ---------------------------------------------------- */
+  #phone-pane {
+    flex:0 0 auto; width:clamp(340px, 46vh, 560px);
+    height:100vh; overflow:hidden;              /* was max-height:100vh; overflow-y:auto */
+    padding:var(--s4); display:flex; flex-direction:column; align-items:center; gap:var(--s2);
+  }
+  #lan-banner, #sig-banner, #controls, #click-hint { flex:0 0 auto; }
+  /* The one flexible track: it absorbs whatever banners and controls leave. */
+  #screen-slot { flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center; width:100%; }
+  #screen-wrap {
+    position:relative; height:100%; max-width:100%;
+    border:8px solid #232b34; border-radius:44px; overflow:hidden; background:#000;
+    box-shadow:0 0 0 1px #39434f, 0 26px 60px rgba(0,0,0,.55);
+    transition:border-color var(--t), box-shadow var(--t);
+  }
+  /* DELETED: #screen-wrap { flex-shrink:0 }  — nothing shrinks it now; the slot does the math.
+     DELETED: #screen { height:min(100vh - 260px, 1180px) } — the magic number that ignored banners. */
+  #screen { display:block; height:100%; width:auto; max-width:100%;
+            background:#000; cursor:crosshair; user-select:none; -webkit-user-drag:none; touch-action:none; }
+  #screen.dead { opacity:.25; }
+  #tap-dot { position:absolute; width:22px; height:22px; border-radius:50%; border:2px solid var(--accent); background:rgba(68,147,248,.35); transform:translate(-50%,-50%); pointer-events:none; opacity:0; transition:opacity .5s; }
+  /* The swipe echo. A drag's only feedback was a dot at its START point AFTER
+     release, and the wheel flick had none at all — flushWheel fetches
+     /api/swipe raw, so it never even earned postGesture's red dot. The line is
+     drawn at SEND time and shows what was actually sent, so it cannot claim a
+     gesture the gates refused. Gradient, not an arrowhead: dim at the origin,
+     bright at the destination, one element, no extra DOM. Thickness lives here
+     (margin-top centres the 3px line on y1) so the JS never hardcodes it. */
+  #swipe-echo { position:absolute; height:3px; margin-top:-1.5px; border-radius:2px;
+                transform-origin:0 50%; pointer-events:none; opacity:0; transition:opacity .45s;
+                background:linear-gradient(90deg, rgba(68,147,248,.15), var(--accent)); }
+  /* Hold-to-long-press. The sweep is the only signal that the press registered,
+     because the phone's own menu does not appear until the device press ends. */
+  @property --hold { syntax:'<percentage>'; initial-value:0%; inherits:false; }
+  #hold-ring { position:absolute; width:46px; height:46px; border-radius:50%; transform:translate(-50%,-50%); pointer-events:none; opacity:0;
+               background:conic-gradient(var(--accent) var(--hold), transparent 0);
+               -webkit-mask:radial-gradient(circle, transparent 54%, #000 56%);
+               mask:radial-gradient(circle, transparent 54%, #000 56%); }
+  #hold-ring.arming { opacity:.95; animation:hold-fill var(--hold-ms,400ms) linear forwards; }
+  #hold-ring.done { opacity:1; --hold:100%; }
+  @keyframes hold-fill { from { --hold:0%; } to { --hold:100%; } }
+  /* No sweep, but the ring must still appear — it is the feedback, not decoration. */
+  @media (prefers-reduced-motion: reduce) {
+    #hold-ring.arming { animation:none; --hold:100%; opacity:.5; }
+  }
+  /* Rows below the phone stretch to the phone's width instead of widening the pane. */
+  #controls, #click-hint, #lan-banner, #sig-banner { width:0; min-width:100%; }
+  #controls { display:flex; flex-direction:column; gap:var(--s1); }
+  #buttons { display:flex; flex-wrap:wrap; justify-content:center; gap:var(--s1); }
+  #click-hint { text-align:center; }
+
+  /* ---- LAN exposure banner (WDA has no auth: must be loud, not a tab away) - */
+  #lan-banner {
+    display:flex; align-items:center; gap:var(--s2); padding:9px 12px;
+    border:1px solid var(--bad); border-radius:var(--r2);
+    background:rgba(248,81,73,.13); color:#ffb9b4; font-size:12.5px; font-weight:600;
+  }
+  #lan-banner span { flex:1; }
+  #lan-banner button { border-color:rgba(248,81,73,.6); color:var(--bad); flex:0 0 auto; }
+  #lan-banner button:hover { background:rgba(248,81,73,.12); border-color:var(--bad); }
+
+  /* ---- send approval: an agent that read the phone wants to text someone.
+     The decision is the human's every time, so it is loud and it blocks. --- */
+  #send-approval, #full-approval {
+    flex:0 0 auto; margin-bottom:var(--s2); padding:10px 12px;
+    border:1px solid var(--bad); border-radius:var(--r2);
+    background:rgba(248,81,73,.13); color:#ffb9b4; font-size:12.5px;
+  }
+  #send-approval .who, #full-approval .who { font-weight:700; }
+  #send-approval .msg, #full-approval .msg {
+    margin:6px 0; padding:6px 8px; border-radius:var(--r2);
+    background:rgba(0,0,0,.25); color:var(--text);
+    max-height:6em; overflow:hidden; word-break:break-word;
+  }
+  #send-approval .why, #full-approval .why { font-size:11.5px; opacity:.9; }
+  #send-approval .row, #full-approval .row { display:flex; gap:var(--s2); margin-top:var(--s2); }
+  #send-approval button, #full-approval button { flex:1 1 0; font-weight:700; }
+  #send-approval .deny, #full-approval .deny { border-color:rgba(248,81,73,.6); color:var(--bad); }
+  #send-approval .approve, #full-approval .approve { border-color:rgba(68,147,248,.6); }
+
+  /* ---- gate setting: always | flagged | off. Anything but "always" is a
+     reduced-safety state, so the control says so in amber. ---------------- */
+  #gate { flex:0 0 auto; display:flex; flex-direction:column; gap:3px; margin-bottom:var(--s2); }
+  #gate .row { display:flex; align-items:center; gap:6px; }
+  #gate .lbl { font-size:11px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); white-space:nowrap; }
+  #gate .seg { display:flex; gap:var(--s1); margin-left:auto; }
+  #gate button {
+    padding:2px 7px; font-size:11px; border-radius:var(--r1);
+    border:1px solid var(--line); background:none; color:var(--dim);
+  }
+  #gate button[aria-pressed="true"] { color:var(--text); border-color:var(--accent); }
+  #gate.relaxed button[aria-pressed="true"] { color:#ffcf8f; border-color:#d29922; }
+  #gate .note { font-size:11px; color:#ffcf8f; line-height:1.3; }
+  #gate .note:empty { display:none; }
+
+  /* ---- signature-expiry banner (7-day free-ID countdown, amber) ------- */
+  #sig-banner {
+    display:flex; align-items:center; gap:var(--s2); padding:9px 12px;
+    border:1px solid var(--warn); border-radius:var(--r2);
+    background:rgba(210,153,34,.12); color:#ffd98e; font-size:12.5px; font-weight:600;
+  }
+  #sig-banner span { flex:1; }
+  #sig-banner button { border-color:rgba(210,153,34,.6); color:var(--warn); flex:0 0 auto; }
+  #sig-banner button:hover { background:rgba(210,153,34,.12); border-color:var(--warn); }
+
+  /* ---- copy button on doctor fix lines -------------------------------- */
+  .copy-btn { padding:2px 8px; font-size:11px; margin-left:6px; vertical-align:baseline; }
+
+  /* ---- paste / clipboard box ------------------------------------------ */
+  #paste-row { display:flex; flex-direction:column; gap:var(--s1); }
+  #paste-input-wrap { display:flex; gap:var(--s1); align-items:stretch; }
+  #paste-text {
+    flex:1; resize:vertical; min-height:34px; max-height:140px;
+    background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--r1); padding:7px 10px; font-family:inherit; font-size:13px;
+  }
+  #paste-text:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  #paste-btns { display:flex; gap:var(--s1); }
+  #paste-btns button { flex:1 1 0; font-size:12px; padding:6px 8px; }
+
+  /* ---- buttons ------------------------------------------------------- */
+  button {
+    background:var(--panel); color:var(--text2); border:1px solid var(--line); border-radius:var(--r1);
+    padding:8px 13px; font-family:inherit; font-size:13px; font-weight:500; line-height:1.2; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center; gap:7px;
+    transition:background var(--t), border-color var(--t), color var(--t);
+  }
+  button:hover { background:var(--panel2); border-color:#465262; color:var(--text); }
+  button:active { transform:translateY(1px); }
+  button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  #btn-fix { border-color:rgba(68,147,248,.55); background:#182838; color:#cfe3ff; }
+  #btn-fix:hover { background:#1e3450; border-color:var(--accent); color:#e6f0ff; }
+  #btn-stop {
+    width:100%; padding:14px 16px; background:rgba(248,81,73,.12);
+    border-color:var(--bad); color:var(--bad);
+    font-weight:700; font-size:14px; letter-spacing:.1em; text-transform:uppercase;
+  }
+  #btn-stop:hover { background:rgba(248,81,73,.22); border-color:var(--bad); color:var(--bad); }
+  #btn-stop.engaged { background:var(--bad); border-color:var(--bad); color:var(--bg); box-shadow:0 0 0 3px rgba(248,81,73,.22); }
+  #btn-stop.engaged:hover { background:#ff6058; color:var(--bg); }
+  #screen-wrap.stopped { border-color:var(--bad); box-shadow:0 0 0 1px var(--bad), 0 0 42px rgba(248,81,73,.28); }
+  #screen-wrap.stopped::after {
+    content:"STOPPED"; position:absolute; left:50%; top:18px; transform:translateX(-50%);
+    padding:5px 12px; border-radius:99px; background:var(--bad); color:var(--bg);
+    font-size:11px; font-weight:700; letter-spacing:.12em; pointer-events:none;
+  }
+  /* A long action owns the phone (unlock is 11s awake, 20-30s after deep
+     sleep). Unlabelled, the pane just looks frozen — which is what makes
+     someone click it again, and those clicks used to queue and fire late.
+     Blue: this is an action in progress, not a fault. STOP still outranks it. */
+  #screen-wrap.busy:not(.stopped) { border-color:var(--accent); }
+  #screen-wrap.busy:not(.stopped)::after {
+    content:attr(data-busy); position:absolute; left:50%; top:18px; transform:translateX(-50%);
+    padding:5px 12px; border-radius:99px; background:var(--accent); color:var(--bg);
+    font-size:11px; font-weight:700; letter-spacing:.12em; pointer-events:none;
+  }
+
+  /* ---- side pane ----------------------------------------------------- */
+  #side {
+    flex:1 1 auto; min-width:0; max-width:1400px;   /* was flex:1; max-width:520px */
+    height:100vh; overflow:hidden;                   /* was overflow-y:auto — the 2nd scrollbar */
+    padding:var(--s4); display:flex; flex-direction:column; gap:var(--s3);
+  }
+  h1 { font-size:17px; font-weight:600; letter-spacing:-.015em; }   /* was 22px */
+  .dim { color:var(--dim); font-size:13px; }
+  .sec { font-size:11px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); margin-bottom:var(--s2); }
+  #doctor { margin-top:var(--s2); }
+
+  #dash-header {
+    flex:0 0 auto; display:flex; align-items:center; gap:var(--s3);
+    padding:9px 12px; background:var(--panel); border:1px solid var(--line); border-radius:var(--r2);
+  }
+  #hdr-checks { border:0; background:none; padding:0; font-size:13px; font-weight:600; gap:var(--s2); }
+  #hdr-checks:hover { background:none; color:var(--text); }
+  #checks-dots { display:inline-flex; gap:3px; }
+  #checks-dots .dot { width:7px; height:7px; }        /* .dot / .dot.bad already exist below */
+  #strip-info { margin-left:auto; font-size:12.5px; white-space:nowrap; }   /* unchanged, just re-parented */
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); display:inline-block; flex:0 0 auto; }
+  .dot.bad { background:var(--bad); }
+  .dot.wait { background:var(--dim); }   /* down, but the link is still coming up */
+
+  #dash-grid {
+    flex:1 1 auto; min-height:0;                     /* min-height:0 is mandatory: without it a grid
+                                                         item refuses to shrink below content size and
+                                                         silently re-creates the scrollbar */
+    display:grid; gap:var(--s3);
+    grid-template-columns:1.1fr 1fr .9fr;
+    grid-template-rows:auto 1fr;
+    grid-template-areas:"actions agent phone"
+                        "actions agent console";
+  }
+  #col-actions{grid-area:actions} #col-agent{grid-area:agent}
+  #col-phone{grid-area:phone}     #col-console{grid-area:console}
+  .col {
+    min-height:0; min-width:0; overflow:hidden; display:flex; flex-direction:column;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r3); padding:var(--s3);
+  }
+  /* The debug column is opened when a helper misbehaves, not read continuously.
+     Keep its padding so "Debug" still lines up with "手机状态" above it; drop the card. */
+  #col-console { background:none; border-color:transparent; }
+  /* DELETED: #tabs, .tab, .tab:hover, .tab.on, .tabpane, #checks-wrap */
+
+  .check {
+    display:flex; gap:var(--s2); padding:9px 12px; border-radius:var(--r2);
+    background:var(--panel); border:1px solid var(--line); border-left-width:3px;
+    margin-bottom:var(--s1); align-items:flex-start;
+  }
+  .check .mark { flex:0 0 34px; font-size:11px; font-weight:700; letter-spacing:.06em; padding-top:3px; }
+  .check .body { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .check .name { font-weight:600; }
+  .check .detail { color:var(--dim); font-size:12.5px; overflow-wrap:anywhere; }
+  .check.ok { border-left-color:var(--ok); }
+  .check.ok .mark { color:var(--ok); }
+  .check.bad { border-left-color:var(--warn); }
+  .check.bad .mark { color:var(--warn); }
+  .check .fix { color:var(--warn); font-size:12.5px; margin-top:3px; overflow-wrap:anywhere; }
+  code { font-family:var(--mono); background:var(--panel); border:1px solid var(--line); padding:1px 6px; border-radius:var(--r1); font-size:12px; }
+
+  /* one-line PASS rows inside the checks overlay */
+  .check.ok, .check.compact { padding:5px 12px; align-items:center; }
+  .check.ok .body, .check.compact .body { flex-direction:row; gap:var(--s2); align-items:baseline; }
+  .check.ok .detail { color:var(--dim); }
+  /* Bounded card height: real fix strings wrap (a 2-line fix made 10 cards
+     clip the panel silently in the adversarial pass). Clamp, don't clip. */
+  .check .detail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .check.bad .fix { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+
+  /* ---- fix-input panel ----------------------------------------------- */
+  #fix-panel { margin-top:0; padding:0; border:0; background:none; }   /* look lives in #ov-panel now */
+  #fix-body { margin-top:var(--s1); line-height:1.6; }
+  #fix-steps { margin-top:var(--s2); display:flex; flex-direction:column; gap:2px; }
+  .fstep { display:flex; gap:var(--s2); align-items:baseline; padding:3px 0; color:var(--dim); font-size:13px; }
+  .fstep .m { flex:0 0 12px; text-align:center; }
+  .fstep.on { color:var(--text); }
+  .fstep.done { color:var(--ok); }
+  .fstep.err { color:var(--warn); }
+
+  /* ---- first-run setup wizard (same step look as fix-input) ------------ */
+  #setup .fstep { font-size:13.5px; }
+  #setup .shelp { margin:2px 0 var(--s2) 20px; color:var(--dim); font-size:12.5px; line-height:1.55; }
+  #setup .shelp a { color:var(--accent); }
+  #setup .shelp code { font-family:var(--mono); background:var(--panel); padding:1px 4px; border-radius:3px; }
+  #setup .sdone { color:var(--ok); margin-bottom:var(--s2); }
+
+  /* ---- live activity feed / recent sends (dashboard columns) ---------- */
+  #col-agent #activity, #col-agent #sent { flex:1 1 0; min-height:0; overflow:hidden; display:flex; flex-direction:column; margin-top:0; }
+  #col-agent #activity { flex-grow:1.6; }   /* 10 rows vs Recent sends' 6 */
+  #activity-list, #sent-list { flex:1 1 auto; min-height:0; overflow:hidden; }   /* was max-height:55vh; overflow-y:auto */
+  .act-row { display:flex; gap:var(--s2); padding:3px 12px; font-size:12.5px; color:var(--text2); }
+  .act-row .t { color:var(--dim); font-size:11.5px; flex:0 0 40px; text-align:right; font-family:var(--mono); }
+  .sent-row {
+    padding:7px 12px; border-radius:var(--r2); background:var(--panel);
+    border:1px solid var(--line); border-left-width:3px; margin-bottom:var(--s1); font-size:12.5px;
+    overflow-wrap:anywhere;
+  }
+  .sent-row.ok { border-left-color:var(--ok); }
+  .sent-row.pending { border-left-color:var(--warn); }
+  .sent-row .who { font-weight:600; }
+  .sent-row .dim { font-size:11.5px; white-space:nowrap; }
+  .act-row, .sent-row { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }  /* constant row height */
+  .sent-row { overflow-wrap:normal; }                                                    /* overrides base rule above */
+  #full-sends .sent-row { white-space:normal; overflow-wrap:anywhere; }  /* overlay: full message text readable */
+
+  /* ---- screen text picker overlay -------------------------------------- */
+  #screen-text-top { display:flex; gap:var(--s1); align-items:center; margin-bottom:var(--s2); }
+  #screen-text-filter {
+    flex:1; background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--r1); padding:7px 10px; font-family:inherit; font-size:13px;
+  }
+  #screen-text-filter:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  #screen-text-list { display:flex; flex-direction:column; gap:var(--s1); max-height:55vh; overflow-y:auto; }
+  .stext-row {
+    display:flex; align-items:center; justify-content:space-between; gap:var(--s2);
+    padding:8px 12px; border-radius:var(--r2); background:var(--panel);
+    border:1px solid var(--line); cursor:pointer; font-size:13px; transition:border-color .15s, background .15s;
+  }
+  .stext-row:hover { border-color:var(--accent); background:#1e293b; }
+  .stext-row .stext-content { flex:1; overflow-wrap:anywhere; user-select:all; }
+  .stext-row .stext-meta { display:flex; align-items:center; gap:var(--s1); flex-shrink:0; }
+  .stext-row .stext-type { font-size:11px; color:var(--dim); font-family:var(--mono); }
+  .stext-row .stext-copy { padding:3px 8px; font-size:11px; }
+  .more-btn { flex:0 0 auto; align-self:flex-start; margin-top:var(--s1); border:0; background:none;
+              padding:2px 0; font-size:12px; color:var(--dim); }
+  .more-btn:hover { background:none; color:var(--accent); }
+
+  /* ---- actions column -------------------------------------------------- */
+  /* max-height lives in JS now. A fixed 150px cut row 5 of the app chips
+     through the middle: the 12-chip count cap wraps to five rows, and half a
+     "Music" chip is exactly the bare clip this column's overflow policy
+     forbids. clampChips() measures the real row height and keeps WHOLE rows. */
+  .chips { display:flex; flex-wrap:wrap; gap:var(--s1); margin-bottom:var(--s2); overflow:hidden; }
+  .chip { padding:5px 11px; border-radius:99px; font-size:12.5px; }
+  #app-chips .chip { text-transform:capitalize; }
+  /* current Home Screen page: the one chip that reports state, not a target */
+  .chip.on { border-color:var(--accent); color:var(--text); background:#20303f; }
+  .chip .pin { margin-left:6px; opacity:.5; }
+  .chip.pinned .pin { opacity:1; }
+  .gap-top { margin-top:var(--s4); }
+  .prow { display:flex; justify-content:space-between; gap:var(--s2); padding:7px 2px;
+          border-bottom:1px solid var(--line); font-size:13px; }
+  .prow .k { color:var(--dim); }
+  #phone-rows { flex:0 0 auto; }
+  #text-to { width:100%; margin-bottom:var(--s1); }
+  #text-to, #text-msg { background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--r1); padding:7px 10px; font-family:inherit; font-size:13px; }
+  #text-to:focus-visible, #text-msg:focus-visible, #console-in:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  #text-row { display:flex; gap:var(--s1); align-items:stretch; }
+  #text-msg { flex:1; resize:vertical; min-height:38px; }
+
+  /* A section heading that carries its own action or its own state readout. */
+  .sechead { display:flex; align-items:baseline; gap:var(--s2); margin-bottom:var(--s2); }
+  .sechead .sec { margin-bottom:0; flex:1; min-width:0;
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sechead button { padding:3px 9px; font-size:12px; flex:0 0 auto; max-width:60%;
+                    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sechead .dim { flex:0 0 auto; font-size:11.5px; white-space:nowrap; }
+  #gest-row { display:flex; flex-wrap:wrap; gap:var(--s1); }
+  #gest-row button { padding:6px 10px; font-size:12.5px; }
+  /* Everything above Thread is fixed; Thread is the one flexible track, so it
+     absorbs the free height instead of leaving it blank at the bottom. */
+  #col-actions > :not(#thread) { flex:0 0 auto; }
+  #thread { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; margin-top:var(--s4); }
+  #thread-list { flex:1 1 auto; min-height:0; overflow:hidden;
+                 display:flex; flex-direction:column; gap:var(--s1); }
+  .bub { max-width:86%; padding:6px 10px; border-radius:13px; font-size:12.5px; line-height:1.45;
+         overflow-wrap:anywhere; flex:0 0 auto; }
+  .bub.them { align-self:flex-start; background:var(--panel2); border:1px solid var(--line);
+              border-bottom-left-radius:4px; }
+  .bub.me { align-self:flex-end; background:#1d3b5c; border:1px solid #2b5688;
+            border-bottom-right-radius:4px; }
+  #thread-note { flex:0 0 auto; margin-top:var(--s2); font-size:11.5px;
+                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Debug console is collapsed by default: the phone pane is the human surface;
+     this card exists to run the agent's own helpers when one misbehaves. */
+  button.sec { background:none; border:0; padding:0; cursor:pointer; text-align:left; }
+  button.sec:hover { background:none; border:0; color:var(--accent); }
+  #debug-blurb { font-size:12.5px; line-height:1.5;
+    display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+  #debug-body { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; overflow:hidden; }
+  #console-row { display:flex; gap:var(--s1); }
+  #console-in { flex:1; background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--r1); padding:7px 10px; font-family:var(--mono); font-size:12.5px; }
+  #console-out { font-family:var(--mono); font-size:12px; background:var(--panel);
+    border:1px solid var(--line); border-radius:var(--r2); padding:var(--s2);
+    margin-top:var(--s2); white-space:pre-wrap; overflow-wrap:anywhere;
+    flex:1 1 auto; min-height:0; overflow:hidden; }   /* was max-height:52vh; overflow:auto */
+  #console-out > div { padding:4px 0; border-bottom:1px solid var(--line); max-height:6em; overflow:hidden; }
+  /* One line with ellipsis: reference text must not eat the output's budget. */
+  #console-hint { margin-top:var(--s2); flex:0 0 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  /* ---- overlay shell --------------------------------------------------- */
+  #ov { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center;
+        background:rgba(0,0,0,.55); }
+  #ov-panel { width:min(760px, 86vw); max-height:88vh; overflow:hidden;   /* HIDDEN, not auto */
+              display:flex; flex-direction:column; gap:var(--s2);
+              background:var(--panel); border:1px solid var(--line); border-radius:var(--r3);
+              padding:var(--s4); box-shadow:0 24px 60px rgba(0,0,0,.6); }
+  #ov-head { display:flex; align-items:center; gap:var(--s2); flex:0 0 auto; }
+  #ov-title { font-weight:600; font-size:15px; flex:1; }
+  #ov-body { flex:1 1 auto; min-height:0; overflow:hidden; }
+  #ov-close { border:0; background:none; padding:13px; font-size:16px; }
+
+  /* Under ~1100px the three-column dashboard cannot hold its content beside the
+     fixed phone pane. A centred, non-wrapping, overflowing flex row clips BOTH
+     edges, which can reach the phone pane and STOP. Stack and scroll instead. */
+  @media (max-width:1100px) {
+    html, body { height:auto; overflow:visible; }
+    body { display:block; }
+    #phone-pane { width:100%; height:auto; }
+    #screen-slot { height:70vh; }
+    #side { height:auto; max-width:none; }
+    #dash-grid { grid-template-columns:1fr; grid-template-rows:none;
+                 grid-template-areas:"actions" "agent" "phone" "console"; }
+    .col, #activity-list, #sent-list, #console-out, #thread-list { overflow:visible; }
+    #col-agent #activity, #col-agent #sent, #console-out, #debug-body, #thread { flex:0 0 auto; }
+    /* The page scrolls here, so there is no height to ration. !important beats
+       the inline max-height clampChips() writes; clampChips also stops REMOVING
+       chips in this mode, or a stacked layout would keep the desktop's cut. */
+    .chips { max-height:none !important; }
+  }
+  body.flow-view #side { display:none; }
+  body.flow-view #phone-pane { width:min(100%, 500px); }
+  body.flow-view #paste-btns { display:none; }
+</style>
+</head>
+<body>
+  <div id="phone-pane">
+    <div id="lan-banner" hidden>
+      <span>⚠ 手机控制端口对局域网开放，WDA 没有身份验证。</span>
+      <button id="btn-lan-lock">限制端口访问</button>
+    </div>
+    <div id="sig-banner" hidden>
+      <span id="sig-banner-text">触控驱动签名即将到期。</span>
+      <button id="btn-sig-fix">修复触控</button>
+    </div>
+    <div id="screen-slot">
+      <div id="screen-wrap">
+        <img id="screen" alt="手机屏幕" src="/api/screenshot">
+        <div id="tap-dot"></div>
+        <div id="hold-ring"></div>
+        <div id="swipe-echo"></div>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="btn-stop" aria-pressed="false">■ 停止</button>
+      <div id="buttons">
+        <button id="btn-home" title="返回主屏幕；再次点击可回到第一页。（Ctrl+Shift+H）">⌂ 主屏幕</button>
+        <button id="btn-unlock">解锁</button>
+        <button id="btn-lock">锁屏</button>
+        <button id="btn-notifs" hidden>▾ 通知中心</button>
+        <button id="btn-control" hidden>▾ 控制中心</button>
+        <button id="btn-shot" title="保存截图为 phone.png；Ctrl+Shift+S 将截图复制到剪贴板。">保存截图</button>
+        <button id="btn-refresh">重新检查</button>
+        <button id="btn-up" hidden>重新连接</button>
+        <button id="btn-fix" hidden>修复触控</button>
+        <button id="btn-setup" hidden>📱 设置向导</button>
+        <button id="btn-lock-ports" hidden>限制端口访问</button>
+      </div>
+      <div id="paste-row" hidden>
+        <div id="paste-input-wrap">
+          <textarea id="paste-text" rows="1" aria-label="输入文字到手机当前输入框"
+            placeholder="在此粘贴文字，输入到手机当前输入框"></textarea>
+          <button id="btn-paste-send" title="将文字输入手机当前输入框">输入文字</button>
+        </div>
+        <div id="paste-btns">
+          <button id="btn-clip-to-phone" title="复制文字到 iPhone 剪贴板">📋 复制到手机</button>
+          <button id="btn-clip-from-phone" title="提取并复制手机屏幕上的文字">📋 复制屏幕文字</button>
+          <button id="btn-img-from-phone" title="将手机剪贴板中的图片复制到电脑">🖼 复制手机图片</button>
+        </div>
+      </div>
+    </div>
+    <div class="dim" id="click-hint">点击操作 · 拖动滑动 · 键盘输入文字</div>
+  </div>
+  <div id="side">
+    <div id="dash-header">
+      <h1 title="通过 USB，在 Windows 上控制 iPhone。">SideTap</h1>
+      <a href="/flows" target="_blank" rel="noopener" style="color:var(--text);font-size:13px">流程录制与回放 ↗</a>
+      <button id="hdr-checks" title="查看全部检查">
+        <span id="checks-dots"></span><span id="checks-text">正在检查…</span>
+      </button>
+      <span id="strip-info" class="dim"></span>
+    </div>
+    <div id="dash-grid">
+      <div id="col-actions" class="col">
+        <h2 class="sec">发送信息</h2>
+        <div id="contact-chips" class="chips"></div>
+        <input id="text-to" aria-label="联系人（与信息 App 中的名称一致）" placeholder="联系人（信息 App 中的名称）">
+        <div id="text-row">
+          <textarea id="text-msg" rows="2" aria-label="信息内容" placeholder="信息内容"></textarea>
+          <button id="btn-text-send">发送</button>
+          <button id="btn-img-send" hidden title="将粘贴的图片（Ctrl+V）发送给此联系人，信息框内容作为图片说明">发送图片</button>
+        </div>
+        <div class="sechead gap-top">
+          <h2 class="sec">打开应用</h2>
+          <button id="btn-running" title="查看已打开的应用；点击切换到应用，点击 ✕ 关闭应用。">已打开的应用 ▸</button>
+        </div>
+        <div id="app-chips" class="chips"></div>
+        <button id="more-apps" class="more-btn" hidden></button>
+        <div class="sechead gap-top">
+          <h2 class="sec">切换主屏幕页</h2>
+          <span class="dim" id="page-now"></span>
+        </div>
+        <div id="page-chips" class="chips"></div>
+        <h2 class="sec gap-top">手势</h2>
+        <div id="gest-row">
+          <button id="g-back" title="从屏幕左边缘向右滑动返回（Ctrl+Shift+B）">← 返回</button>
+          <button id="g-search" title="在主屏幕向下滑动，打开聚焦搜索">搜索</button>
+          <button id="g-up" title="向上滚动屏幕">向上滚动 ↑</button>
+          <button id="g-down" title="向下滚动屏幕">向下滚动 ↓</button>
+        </div>
+        <div id="thread">
+          <div class="sechead">
+            <h2 class="sec">对话</h2>
+            <button id="btn-read-thread">读取对话</button>
+          </div>
+          <div id="thread-list"></div>
+          <div class="dim" id="thread-note">在手机上打开对话，仅读取内容。</div>
+        </div>
+      </div>
+      <div id="col-agent" class="col">
+        <div id="gate">
+          <div class="row">
+            <span class="lbl">发送前确认</span>
+            <span class="seg">
+              <button data-mode="always" aria-pressed="false">每次确认</button>
+              <button data-mode="flagged" aria-pressed="false">仅可疑时确认</button>
+              <button data-mode="off" aria-pressed="false">关闭</button>
+            </span>
+          </div>
+          <div class="note" id="gate-note"></div>
+        </div>
+        <div id="send-approval" hidden></div>
+        <div id="activity">
+          <h2 class="sec">操作记录</h2>
+          <div id="activity-list"></div>
+          <button id="more-activity" class="more-btn" hidden></button>
+        </div>
+        <div id="sent">
+          <h2 class="sec">最近发送</h2>
+          <div id="sent-list"></div>
+          <button id="more-sends" class="more-btn" hidden></button>
+        </div>
+      </div>
+      <div id="col-phone" class="col">
+        <h2 class="sec">手机状态</h2>
+        <div id="phone-rows" class="dim">正在等待手机…</div>
+        <div class="dim gap-top">这里只读取状态，不执行手机操作。</div>
+        <div class="sechead gap-top">
+          <h2 class="sec">照片</h2>
+          <button id="btn-photos" title="通过 USB 将手机中的新照片和视频复制到电脑，自动跳过已导入的文件。">导入电脑</button>
+        </div>
+        <div class="dim" id="photos-note">通过 USB 导入新照片，导入期间仍可控制手机。</div>
+      </div>
+      <div id="col-console" class="col">
+        <button class="sec" id="debug-toggle">调试 ▸</button>
+        <div class="dim" id="debug-blurb">
+          手动运行助手函数。日常操作请使用左侧手机画面；遇到问题时，可在这里查看 <code>ocr()</code> 识别结果或复制调试输出。
+        </div>
+        <div id="debug-body" hidden>
+          <div id="console-row">
+            <input id="console-in" aria-label="调试命令" placeholder='tap_text("通用") · 回车运行，↑ 查看历史' spellcheck="false">
+            <button id="btn-console-run">运行</button>
+          </div>
+          <div id="console-out" hidden></div>
+          <button id="more-console" class="more-btn" hidden></button>
+          <div class="dim" id="console-hint">
+            仅支持允许的助手函数： <code>ocr()</code>, <code>tap_text("…")</code>,
+            <code>open_app("…")</code>, <code>swipe(x1,y1,x2,y2)</code>,
+            <code>send_message("Mom","hi")</code>…
+            助手也可在终端中使用相同函数： <code>phone-harness &lt;&lt;'PY' … PY</code>.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="ov" hidden>
+    <div id="ov-panel" role="dialog" aria-modal="true" aria-labelledby="ov-title">
+      <div id="ov-head">
+        <span id="ov-title"></span>
+        <button id="ov-close">×</button>
+      </div>
+      <div id="ov-body">
+        <div id="doctor" hidden><div class="dim">正在检查…</div></div>
+        <div id="fix-panel" hidden>
+          <div class="dim" id="fix-body">
+            Touch input needs WebDriverAgent re-signed. Click <b>修复触控</b>, then in
+            Sideloadly load <code>wda/WebDriverAgent.ipa</code> and press Start. It signs
+            the driver locally with your existing Apple ID. No password re-entry.
+          </div>
+          <div id="fix-steps"></div>
+        </div>
+        <div id="setup" hidden></div>
+        <div id="full-activity" hidden></div>
+        <div id="full-apps" hidden></div>
+        <div id="full-running" hidden></div>
+        <div id="full-sends" hidden></div>
+        <div id="full-console" hidden></div>
+        <div id="full-approval" hidden></div>
+        <div id="screen-text" hidden>
+          <div id="screen-text-top">
+            <input id="screen-text-filter" placeholder="筛选屏幕文字…" aria-label="筛选屏幕文字">
+            <button id="btn-copy-all-screen" class="sec">📋 复制全部文字</button>
+          </div>
+          <div id="screen-text-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+<script>
+if (new URLSearchParams(location.search).has('flow_view')) document.body.classList.add('flow-view');
+function zhCheck(value) {
+  const labels = {"kill switch (STOP)": "紧急停止开关", "go-ios installed": "go-ios 工具", "iPhone on USB": "iPhone USB 连接", "tunnel": "通信隧道", "developer image (DDI)": "开发者镜像（DDI）", "perception (view/OCR)": "画面与文字识别", "WDA installed (input)": "触控驱动安装", "WDA responding (input)": "触控驱动连接", "input signature (7-day)": "驱动签名（7 天）", "expiry reminder": "签名到期提醒", "LAN exposure": "局域网访问", "kill switch off": "停止开关未启用", "iOS 17+ tunnel is up": "通信隧道已连接", "developer image mounted": "开发者镜像已挂载", "WDA/MJPEG ports are loopback-only": "控制和画面端口仅允许本机访问", "no captured profile to check (fix-input records one)": "未保存可供诊断的签名文件（不影响当前使用）", "no daily expiry toast — install: phone-harness notify-expiry --install": "尚未启用每日到期提醒"};
+  const s = String(value || '');
+  if (labels[s]) return labels[s];
+  return s.replace(/^go-ios found: /, 'go-ios 路径：')
+    .replace(/^iPhone connected: /, 'iPhone 已连接：')
+    .replace(/^live screen capture works /, '实时画面正常 ')
+    .replace(/^WebDriverAgent installed: /, '触控驱动已安装：')
+    .replace(/^WDA answering at /, '触控驱动已响应：');
+}
+const screen = document.getElementById('screen');
+const dot = document.getElementById('tap-dot');
+let points = null;   // {width, height} of 手机屏幕 (points if input up, else pixels)
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(url + ' -> ' + r.status);
+  return r.json();
+}
+
+let inputEnabled = false;
+let streaming = false;
+// One /api/status at a time. On a wedged link the handler runs the client's
+// full 10s inside orientation() while setInterval keeps firing every 5s, so
+// four of them stack up, each firing its own request into a WDA that serves
+// one at a time. The same "one request at a time (never overlapping)" rule
+// poll() already follows.
+let statusInFlight = false;
+// How long the phone may answer nothing before the picture is called frozen.
+// Above _HEAL_MIN_SILENCE (45s) and above every legitimate long hold — unlock
+// from a fresh lock ~11s, the first gesture after a deep sleep 20.5s,
+// read_messages 10-20s — all of which LAND ACTIONS, which _actions_landing()
+// reads and which zeroes the clock outright. A UI threshold, so a one-line
+// revert if it ever cries wolf.
+const STALL_SECONDS = 60;
+let bootSeen = null;  // viewer process id; a change means stale JS — reload
+let lastDoctor = [];
+
+// Button feedback ("已锁屏。", "已解锁。") lives in the same hint line the
+// status poll rewrites every 5s; hold fresh feedback so the poll can't wipe
+// it before the human reads it.
+let hintHoldUntil = 0;
+// Every error the UI shows funnels through here, so the tidying belongs here
+// and not at each call site. WDA answers a refused request with a ~1.4KB blob
+// of nested NSError text, and pressing Home on a LOCKED phone is the everyday
+// way to earn one: /wda/homescreen cannot open the springboard while the device
+// is locked, and goto_home_page() calls press_home() to leave an app, so BOTH
+// halves of the Home button reach it. Rendered raw, that filled a third of the
+// page (reported 2026-08-12, on a phone still on its lock screen after a
+// restart). Name the fix the way doctor does, and never let any error paste
+// paragraphs into a pane whose whole layout policy is degrade-to-fit.
+const HINT_MAX = 160;
+function showHint(text) {
+  let t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (/could not be, unlocked|reason: Locked/i.test(t)) {
+    t = '手机已锁定，请先解锁。';
+  }
+  if (t.length > HINT_MAX) t = t.slice(0, HINT_MAX - 1) + '…';
+  document.getElementById('click-hint').textContent = t;
+  hintHoldUntil = Date.now() + 6000;
+}
+
+// A long action (unlock, a send, an app launch) owns the phone for 10-30s.
+// The server now DROPS gestures made meanwhile rather than queueing them, so
+// the pane has to say it is busy — otherwise it reads as frozen and gets
+// clicked, which is how the stale-gesture burst started.
+let busyLabel = '';
+function setBusy(label) {
+  busyLabel = label;
+  const wrap = document.getElementById('screen-wrap');
+  if (label) wrap.dataset.busy = label;
+  wrap.classList.toggle('busy', !!label);
+}
+async function withBusy(label, fn) {
+  setBusy(label);
+  try { return await fn(); } finally { setBusy(''); }
+}
+// True when a gesture should not even be sent. Answers the click locally so
+// the human gets a reason instantly instead of a dropped request.
+function phoneBusy() {
+  if (!busyLabel) return false;
+  showHint(busyLabel.charAt(0) + busyLabel.slice(1).toLowerCase() +
+           '…完成前将忽略点击。');
+  return true;
+}
+// The fire-and-forget gesture buttons (Home, the edge-gesture shortcuts). They
+// had no failure to report before; a dropped gesture is a real outcome, so it
+// gets said instead of the button looking like it did nothing.
+async function gesturePost(url, body) {
+  if (phoneBusy()) return;
+  const r = await fetch(url, {method:'POST', headers:JSON_HDR,
+                              body: JSON.stringify(body || {})});
+  if (!r.ok) {   // 409 dropped, or 502 from a hung/refused WDA — say why
+    const j = await r.json().catch(() => ({}));
+    showHint(j.error || '手机未响应此次手势。');
+    return;
+  }
+  schedulePhoneRefresh();   // Notifs/Control/Back edge gestures land here too
+}
+// The typed and wheeled batches below awaited their response and never looked
+// at it, so a 409 (another holder of _ACTION_LOCK: /api/clipboard,
+// /api/screen-text reading a 3.0-5.7s Home Screen /source, a second viewer tab,
+// or the chained flush whose phoneBusy() guard ran before this tab's busy label
+// existed), a 502 (WDAError) and a rejected fetch all lost the whole buffer in
+// silence — the same freeze-looking silence viewer.py's PhoneBusy branch exists
+// to break. Nothing is replayed: a re-send lands on whatever screen the long
+// action left, which is the 2026-08-11 stale-gesture burst. And this
+// deliberately does NOT open with phoneBusy() the way gesturePost does — that
+// guard here would swallow a buffered keyBuf whenever this tab shows a busy
+// label, which is the 2026-08-12 nested-withBusy bug pointed at the keyboard.
+// A COUNT, never the characters: typed text is recorded nowhere, and a passcode
+// gets typed into this viewer too.
+async function reportNotSent(resp, what) {
+  if (resp && resp.ok) return;
+  let msg = '';
+  if (resp) { const j = await resp.json().catch(() => ({})); msg = j.error || ''; }
+  showHint((msg || '手机未响应操作。') + ' (' + what + ' not sent)');
+}
+
+// WDA's MJPEG server pushes ~15fps video; polling go-ios PNGs is the fallback.
+function startStream(port) {
+  if (streaming) return;
+  streaming = true;
+  screen.onload = null;
+  screen.onerror = () => { streaming = false; setTimeout(poll, 500); };
+  screen.src = 'http://' + location.hostname + ':' + port + '/';
+}
+
+async function loadStatus() {
+  if (document.hidden) return;   // hidden tab: don't re-open the MJPEG stream
+  if (statusInFlight) return;    // see statusInFlight: never stack on a wedge
+  statusInFlight = true;
+  try {
+    const s = await getJSON('/api/status');
+    // A restarted viewer serves new endpoints this page's JS may not know
+    // (and vice versa); reload once so tab and server always match.
+    if (s.boot) {
+      if (bootSeen && s.boot !== bootSeen) { location.reload(); return; }
+      bootSeen = s.boot;
+    }
+    points = s.window;
+    inputEnabled = !!s.input;
+    // Why the link is down, not just that it is: 'wedged' means the socket
+    // accepts and nothing answers, so the signed driver is on the phone and
+    // re-signing is the wrong repair. An older server sends no link at all.
+    const link = s.link || (inputEnabled ? 'up' : 'down');
+    // The link comes up in a background thread after this page opens. While
+    // that runs, a dead tunnel is "starting", not "failing".
+    const wasStarting = linkStarting;
+    linkStarting = s.starting === true;
+    // Bring-up just finished and checks are still failing (a retry is pending):
+    // ask them again NOW instead of waiting out the backoff.
+    if (wasStarting && !linkStarting && doctorTimer) { doctorTries = 0; loadDoctor(); }
+    if (s.mjpeg) startStream(s.mjpeg);
+    // A frozen MJPEG frame looks perfectly live: the stream just stops
+    // receiving parts, the <img> holds its last frame and never fires onerror,
+    // and /api/status still answers 200, so nothing here used to dim. Gate on
+    // `streaming` as well as on the silence — where WDA has never come up
+    // silent_for grows without bound while onerror has already handed the
+    // picture to the go-ios /api/screenshot poll, which is genuinely live, and
+    // dimming that is the same lying-status bug pointed the other way.
+    const stalled = streaming && (s.silent_for || 0) >= STALL_SECONDS;
+    screen.classList.toggle('dead', stalled);
+    if (Date.now() >= hintHoldUntil) {
+      // The frozen picture is the one fact nothing else on the page corrects:
+      // the dim says something is wrong, only this line says what. It claims
+      // no recovery — _should_heal wants lockdown, deep sleep gates lockdown,
+      // so the clock can run for hours with nothing being tried. The wedge's
+      // own repair is not lost with it: btn-up stays visible in every failing
+      // state and the checks panel names the wedge.
+      document.getElementById('click-hint').textContent = stalled
+        ? '手机超过一分钟未响应，当前画面已停滞。'
+        : inputEnabled
+        ? '点击操作 · 拖动滑动 · 键盘输入文字'
+        : link === 'wedged'
+          ? '当前应用阻塞了连接，请点击“重新连接”恢复主屏幕。'
+          : '画面已连接；触控需要已签名的驱动，请查看右侧诊断。';
+    }
+    // First run (WDA has never published a session): offer the setup wizard.
+    setupNeeded = s.setup_done === false;
+    setupAppDir = s.app_dir || '';
+    document.getElementById('btn-setup').hidden = !setupNeeded;
+    if (ovOpen === 'setup') renderSetup();
+    // Show the fix affordance only while input is off and no job is running.
+    if (!fixRunning) {
+      // Restart link stays visible in EVERY failing state — POST /api/up
+      // unwedges before it restarts anything, so it is the repair for both.
+      document.getElementById('btn-fix').hidden = inputEnabled || link === 'wedged';
+      document.getElementById('btn-up').hidden = inputEnabled;
+    }
+    // Gesture shortcuts and the paste box need the input driver.
+    document.getElementById('btn-notifs').hidden = !inputEnabled;
+    document.getElementById('btn-control').hidden = !inputEnabled;
+    document.getElementById('paste-row').hidden = !inputEnabled;
+    updateActionAvail();
+    // Loud by default: WDA has no auth, so exposure is a banner, not a tab.
+    document.getElementById('lan-banner').hidden = s.lan_exposed !== true;
+  } catch (e) {
+    points = null; screen.classList.add('dead');
+    linkStarting = false;   // can't confirm a bring-up: stop claiming one
+  } finally {
+    statusInFlight = false;
+  }
+}
+
+// Refresh the still image one request at a time (never overlapping).
+function poll() {
+  if (streaming) return;
+  screen.onload = screen.onerror = () => { if (!streaming) setTimeout(poll, 900); };
+  screen.src = '/api/screenshot?t=' + Date.now();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ---- overlay controller: one shell, five hidden bodies, exactly one visible.
+let ovOpen = null;
+const OV_BODIES = ['doctor','fix-panel','setup','full-activity','full-apps','full-running','full-sends','full-console','full-approval','screen-text'];
+let ovReturnFocus = null;
+function openOverlay(id, title) {
+  OV_BODIES.forEach(b => document.getElementById(b).hidden = b !== id);
+  document.getElementById('ov-title').textContent = title;
+  document.getElementById('ov').hidden = false;
+  ovOpen = id;
+  degradeChecksToFit();
+  ovReturnFocus = document.activeElement;
+  document.getElementById('ov-close').focus();
+}
+// Card height depends on text, so count caps alone can lie (a 2-line fix
+// clipped card 8 in the adversarial pass). This runs ONCE per render/open —
+// not on a poll, so no thrash — and collapses expanded FAIL cards to compact
+// one-liners until the body genuinely fits. Nothing is ever clipped invisibly.
+function degradeChecksToFit() {
+  const body = document.getElementById('ov-body');
+  const doc = document.getElementById('doctor');
+  if (document.getElementById('ov').hidden || doc.hidden) return;
+  let guard = 20;
+  while (body.scrollHeight > body.clientHeight + 1 && guard--) {
+    const exp = doc.querySelectorAll('.check.bad:not(.compact)');
+    if (!exp.length) break;
+    const last = exp[exp.length - 1];
+    last.classList.add('compact');
+    const fix = last.querySelector('.fix');
+    if (fix) fix.remove();
+  }
+}
+function closeOverlay() { document.getElementById('ov').hidden = true; ovOpen = null; if (ovReturnFocus) ovReturnFocus.focus(); ovReturnFocus = null; }
+document.getElementById('ov-close').onclick = closeOverlay;
+document.getElementById('ov').onclick = (ev) => { if (ev.target.id === 'ov') closeOverlay(); };
+
+// ---- dashboard header: click opens the checks overlay -----------------------
+document.getElementById('hdr-checks').onclick = () => openOverlay('doctor', '连接诊断');
+
+function sentRowHtml(r) {
+  return `
+      <div class="sent-row ${r.sent ? 'ok' : 'pending'}">
+        <span class="who">${escapeHtml(r.resolved_title || r.contact)}</span>:
+        ${escapeHtml(r.text)}
+        <span class="dim">${r.sent ? '✓ 已发送' : '… 已尝试发送'}</span>
+      </div>`;
+}
+// Show what the agent has texted, so the human sees each send (sec-5 audit log).
+async function loadSent() {
+  try {
+    const recs = await getJSON('/api/actions');
+    const sig = JSON.stringify(recs);
+    sendRecs = recs;
+    if (sig !== sentSig) { sentSig = sig; renderContactChips(); }
+    const base = recs.slice(-6).reverse();
+    document.getElementById('sent-list').innerHTML = base.length
+      ? base.map(sentRowHtml).join('')
+      : '<div class="dim">暂无发送记录。</div>';
+    document.getElementById('full-sends').innerHTML = recs.slice(-14).reverse().map(sentRowHtml).join('');
+    const more = document.getElementById('more-sends');
+    more.hidden = recs.length <= 6;
+    more.textContent = '+' + (recs.length - 6) + ' 条更早记录 ▸';
+  } catch (e) { /* panel is best-effort */ }
+}
+document.getElementById('more-sends').onclick = () => openOverlay('full-sends', '最近发送');
+
+// The gate setting. Only reachable here and in .env, never from an agent tool:
+// a gate an injected instruction can switch off is not a gate.
+const GATE_NOTE = {
+  always: '',
+  flagged: '仅在检测到可疑内容时确认；刻意规避检测的内容可能通过。',
+  off: '发送前不再确认；仍可通过停止按钮和操作记录监督。',
+};
+function renderGate(m) {
+  document.getElementById('gate').classList.toggle('relaxed', m !== 'always');
+  document.getElementById('gate-note').textContent = GATE_NOTE[m] || '';
+  document.querySelectorAll('#gate button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
+}
+async function loadGate() {
+  try { renderGate((await getJSON('/api/send_approval')).mode); }
+  catch (e) { /* panel is best-effort */ }
+}
+document.querySelectorAll('#gate button').forEach(b => {
+  b.onclick = async () => {
+    try {
+      const j = await getJSON('/api/send_approval', {method:'POST', headers:JSON_HDR,
+        body: JSON.stringify({ mode: b.dataset.mode })});
+      renderGate(j.mode);
+    } catch (e) { loadGate(); }
+  };
+});
+
+// An agent that read the phone is asking to send. Untrusted content is already
+// in its context, so this decision is the human's, every time. No "always
+// allow": the risk lives in the message, not in the contact. The agent's call
+// is blocked in another process until this is answered, and giving no answer
+// refuses the send.
+let approvalShown = null;
+function approvalHtml(p) {
+  const flags = (p.flags || []).length
+    ? `<div class="why">⚑ ${p.flags.map(escapeHtml).join(' · ')}</div>` : '';
+  return `<div class="who">助手请求发送信息给 ${escapeHtml(p.contact)}</div>
+    <div class="msg">${escapeHtml(p.text)}</div>
+    <div class="why">助手在请求发送前读取了手机（${escapeHtml(p.taint_source)}）。</div>
+    ${flags}
+    <div class="row">
+      <button class="deny" onclick="decideSend('${p.id}','deny')">拒绝</button>
+      <button class="approve" onclick="decideSend('${p.id}','approve')">批准</button>
+    </div>`;
+}
+async function decideSend(id, decision) {
+  try {
+    await getJSON('/api/send_decision', {method:'POST', headers:JSON_HDR,
+      body: JSON.stringify({ id, decision })});
+  } catch (e) { /* no answer reaches the agent: its send times out and denies */ }
+  approvalShown = null;
+  document.getElementById('send-approval').hidden = true;
+  if (ovOpen === 'full-approval') closeOverlay();
+  loadApproval();
+}
+async function loadApproval() {
+  try {
+    const { pending } = await getJSON('/api/pending_send');
+    const box = document.getElementById('send-approval');
+    if (!pending) {
+      box.hidden = true; approvalShown = null;
+      if (ovOpen === 'full-approval') closeOverlay();
+      return;
+    }
+    const html = approvalHtml(pending);
+    box.innerHTML = html;
+    document.getElementById('full-approval').innerHTML = html;
+    box.hidden = false;
+    if (approvalShown !== pending.id) {   // demand attention once per request
+      approvalShown = pending.id;
+      openOverlay('full-approval', '批准发送这条信息？');
+    }
+  } catch (e) { /* panel is best-effort */ }
+}
+
+// The whole trust story is "you can see what the agent does" — every action any
+// process sends to the phone lands here (taps, swipes, typing; never key text).
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h';
+}
+function zhAction(action) {
+  return String(action).replace(/^elements$/, '读取界面元素')
+    .replace(/^button: home$/, '按下主屏幕键').replace(/^home$/, '返回主屏幕')
+    .replace(/^tap /, '点击 ').replace(/^swipe /, '滑动 ')
+    .replace(/^type \((\d+) chars\)$/, '输入文字（$1 个字符）');
+}
+function activityRowHtml(r) {
+  return `<div class="act-row"><span class="t">${ago(r.ts)}</span><span>${escapeHtml(zhAction(r.action))}</span></div>`;
+}
+async function loadActivity() {
+  try {
+    const recs = await getJSON('/api/activity');
+    const base = recs.slice(-10).reverse();
+    document.getElementById('activity-list').innerHTML = base.length
+      ? base.map(activityRowHtml).join('')
+      : '<div class="dim">暂无操作记录。</div>';
+    const fullRecs = recs.slice(-24).reverse();
+    const notShown = recs.length - 24;
+    document.getElementById('full-activity').innerHTML = fullRecs.map(activityRowHtml).join('') +
+      (notShown > 0 ? `<div class="dim">+${notShown} earlier not shown</div>` : '');
+    const more = document.getElementById('more-activity');
+    more.hidden = recs.length <= 10;
+    more.textContent = '+' + (recs.length - 10) + ' 条更早记录 ▸';
+  } catch (e) { /* panel is best-effort */ }
+}
+document.getElementById('more-activity').onclick = () => openOverlay('full-activity', '操作记录');
+
+// ---- Phone tab + strip glance info (passive reads only) --------------------
+function zhApp(name) { const labels = {"app store": "App Store", "calculator": "计算器", "calendar": "日历", "camera": "相机", "clock": "时钟", "facetime": "FaceTime", "files": "文件", "health": "健康", "mail": "邮件", "maps": "地图", "messages": "信息", "music": "音乐", "notes": "备忘录", "phone": "电话", "photos": "照片", "reminders": "提醒事项", "safari": "Safari", "settings": "设置", "shortcuts": "快捷指令", "wallet": "钱包", "weather": "天气"}; return labels[String(name).toLowerCase()] || name; }
+function appName(app) {
+  return (app && (app.name || String(app.bundleId || '').split('.').pop())) || '?';
+}
+async function loadPhone() {
+  if (document.hidden) return;   // hidden tab: stop touching the phone over USB
+  try {
+    const p = await getJSON('/api/phone');
+    const bits = [];
+    if (p.battery && p.battery.level != null)
+      bits.push('🔋' + Math.round(p.battery.level * 100) + '%');
+    if (p.locked != null) bits.push(p.locked ? '🔒' : '🔓');
+    if (p.app) bits.push(appName(p.app));
+    document.getElementById('strip-info').textContent = bits.join('  ');
+    const sig = lastDoctor.find(r => r.name === 'input signature (7-day)');
+    const rows = [
+      ['电量', p.battery && p.battery.level != null
+        ? Math.round(p.battery.level * 100) + '%' + (p.battery.state === 2 ? ' · 充电中' : '')
+        : '—'],
+      ['锁屏状态', p.locked == null ? '—'
+        : (p.locked ? '已锁屏' : '已解锁') + '（仅显示状态）'],
+      ['当前应用', p.app ? appName(p.app) + ' · ' + (p.app.bundleId || '') : '—'],
+      ['屏幕', points ? points.width + ' × ' + points.height + ' pt' : '—'],
+      ['会话', p.session ? String(p.session).slice(0, 8) : '—'],
+      ['驱动签名', sig ? zhCheck(sig.detail) : '—'],
+    ];
+    document.getElementById('phone-rows').innerHTML = rows.map(([k, v]) =>
+      `<div class="prow"><span class="k">${k}</span><span>${escapeHtml(v)}</span></div>`).join('');
+    renderPageChips(p.page || null);   // null off the Home Screen; the server
+  } catch (e) { /* passive info is best-effort */ }   // only reads it there
+}
+
+// The periodic /api/phone poll ships DISABLED (VIEWER_PHONE_POLL_SECONDS = 0)
+// because that poll reads active_app() every 10s and could trigger the WDA
+// heavy-tail wedge on its own with nobody driving (docs/VIEWER_PHONE_POLL.md).
+// So everything loadPhone paints — battery, lock state, front app, session,
+// and the "切换主屏幕页" chips, which are an ACTION control and not passive
+// info — was painted once at page load and then lied for the rest of the
+// session. Refresh it after the human does something that can change it
+// instead. The timer RESETS on every gesture, so a 30-flick scroll costs one
+// read at the end rather than thirty, and an idle viewer still touches the
+// phone exactly zero times, which is the whole point of the 0 default.
+// Deleting the call sites and this block restores today's behaviour exactly.
+const PHONE_REFRESH_DEBOUNCE_MS = 1500;   // UI cadence, not a device number
+let phoneRefreshTimer = null;
+function schedulePhoneRefresh() {
+  clearTimeout(phoneRefreshTimer);
+  phoneRefreshTimer = setTimeout(() => {
+    // /api/phone serves its CACHED _LAST_PHONE while _ACTION_LOCK is held, so
+    // a refresh that lands mid-action renders PRE-action state and then stops,
+    // i.e. the honest glance quietly lies again. Re-arm instead of reading.
+    if (busyLabel) { schedulePhoneRefresh(); return; }
+    loadPhone();   // itself a no-op while the tab is hidden
+  }, PHONE_REFRESH_DEBOUNCE_MS);
+}
+
+// start network loops only after the page has fully loaded
+window.addEventListener('load', () => {
+  loadStatus(); loadDoctor(); loadSent(); loadStop(); loadActivity(); loadPhone();
+  getJSON('/api/apps').then(j => { knownApps = j.known; renderAppChips(); }).catch(() => {});
+  poll();
+  setInterval(loadStatus, 5000);
+  setInterval(loadSent, 5000);
+  setInterval(loadStop, 5000);
+  setInterval(loadActivity, 3000);
+  setInterval(loadApproval, 1000);  // a blocked send must surface fast
+  loadApproval();
+  loadGate();
+  // Configure periodic polling of /api/phone from server side. Server may
+  // return 0 to disable the periodic poll (recommended when a device is
+  // susceptible to WDA heavy-tail wedges). The viewer still calls loadPhone
+  // once on load so the UI is populated.
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    const s = Number(cfg.phone_poll_seconds) || 0;
+    if (s > 0) {
+      setInterval(loadPhone, Math.max(1000, Math.round(s * 1000)));
+    }
+  }).catch(() => {
+    // Fallback: keep the previous 10s poll if config cannot be read.
+    setInterval(loadPhone, 10000);
+  });
+  // Both clamps are measured, so both are wrong the moment the window changes
+  // size. Re-fit on resize only — never on a poll, or the column would thrash.
+  let refit;
+  addEventListener('resize', () => {
+    clearTimeout(refit);
+    refit = setTimeout(() => { renderAppChips(); renderThread(); }, 150);
+  });
+});
+
+// A hidden tab still pulls ~334 KB/s of MJPEG video plus two phone-touching
+// polls (loadStatus, loadPhone), contending with an agent's own WDA session
+// over the same USB link. Closing screen.src here is not enough by itself:
+// loadStatus's own `if (s.mjpeg) startStream(...)` would re-open the stream
+// the next time its 5s setInterval fires, because Chrome only coalesces
+// hidden-tab timers to 1s granularity for the first 5 minutes — it does not
+// stop them running. loadStatus and loadPhone each early-return on
+// document.hidden instead (top of each function), so the interval still
+// fires but does nothing. loadApproval is left running untouched here on
+// purpose: the send-approval gate must stay armed while the tab is hidden.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    screen.onload = null;
+    screen.onerror = null;
+    screen.src = '';
+    streaming = false;
+  } else {
+    // Instant restore, not a wait for the next poll tick. poll() waits for
+    // loadStatus (which never rejects) because it is async: run bare, it saw
+    // `streaming` still false and fetched a /api/screenshot still frame —
+    // 0.22s of WDA time, one request at a time — that startStream() was about
+    // to make pointless, in the instant the human is about to click.
+    loadStatus().finally(poll); loadPhone();
+  }
+});
+
+// ---- kill switch: blocks all agent actions until resumed -------------------
+let stopped = false;
+function renderStop() {
+  const b = document.getElementById('btn-stop');
+  b.classList.toggle('engaged', stopped);
+  b.setAttribute('aria-pressed', String(stopped));
+  b.textContent = stopped ? '▶ 恢复' : '■ 停止';
+  document.getElementById('screen-wrap').classList.toggle('stopped', stopped);
+}
+async function loadStop() {
+  try { stopped = (await getJSON('/api/stop')).stopped; renderStop(); }
+  catch (e) { /* viewer state poll is best-effort */ }
+}
+
+function showDot(px, py, ok) {
+  dot.style.left = px + 'px';
+  dot.style.top = py + 'px';
+  dot.style.borderColor = ok ? '#4493f8' : '#f85149';
+  dot.style.opacity = 1;
+  setTimeout(() => dot.style.opacity = 0, ok ? 400 : 600);
+}
+
+// The swipe's own echo, drawn at SEND time — a drag showed a dot at its start
+// point and nothing else, and the wheel flick showed nothing at all, so the
+// most-used gesture had a blank 0.35-0.7s round trip. Both call sites sit past
+// the inputEnabled/phoneBusy gates, so the line can never claim a gesture that
+// was refused. Coordinates are px relative to #screen's rect, the same space
+// showDot uses (absolutely positioned children of #screen-wrap sit at its
+// padding box, which is #screen's origin).
+const echo = document.getElementById('swipe-echo');
+const SWIPE_ECHO_MS = 700;   // covers the 0.35-0.7s round trip; one-line revert
+function showSwipeEcho(x1, y1, x2, y2) {
+  echo.style.left = x1 + 'px';
+  echo.style.top = y1 + 'px';
+  echo.style.width = Math.hypot(x2 - x1, y2 - y1) + 'px';
+  echo.style.transform = 'rotate(' + Math.atan2(y2 - y1, x2 - x1) + 'rad)';
+  echo.style.opacity = 1;
+  setTimeout(() => echo.style.opacity = 0, SWIPE_ECHO_MS);
+}
+
+// Press = tap, hold = long press, drag = swipe (release point sets direction;
+// hold time sets speed). The long press fires on a local timer WHILE the button
+// is still down, so the phone's menu opens during the hold instead of a second
+// after release. These helpers are shared scope because fireLongPress runs
+// before pointerup exists.
+const LONG_PRESS_MS = 400;       // local hold before we send it
+const LONG_PRESS_SECONDS = 0.8;  // how long the phone itself holds
+const holdRing = document.getElementById('hold-ring');
+holdRing.style.setProperty('--hold-ms', LONG_PRESS_MS + 'ms');
+
+const clampUnit = (v, max) => Math.min(Math.max(v, 0), max);
+function toPt(cx, cy, r) {
+  return {
+    x: clampUnit((cx - r.left) / r.width, 1) * points.width,
+    y: clampUnit((cy - r.top) / r.height, 1) * points.height,
+  };
+}
+async function postGesture(url, body, dotX, dotY) {
+  const resp = await fetch(url, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (resp.ok) { schedulePhoneRefresh(); return; }
+  showDot(dotX, dotY, false);
+  // 409 = dropped as stale; 502 = WDA refused or hung (a locked phone's
+  // lock-screen tap does this every time). Either way the red dot alone
+  // read as "nothing happened" — say why (live 2026-08-31).
+  const j = await resp.json().catch(() => ({}));
+  showHint(j.error || '手机未响应此次手势。');
+}
+
+function showRing(px, py) {
+  holdRing.style.left = px + 'px';
+  holdRing.style.top = py + 'px';
+  holdRing.classList.remove('arming', 'done');
+  void holdRing.offsetWidth;            // reflow, so the animation restarts
+  holdRing.classList.add('arming');
+}
+function killRing() { holdRing.classList.remove('arming', 'done'); }
+function completeRing() {
+  holdRing.classList.remove('arming');
+  holdRing.classList.add('done');
+  setTimeout(killRing, 260);
+}
+
+let drag = null;
+function cancelHold() {
+  if (drag && drag.timer) { clearTimeout(drag.timer); drag.timer = null; }
+  killRing();
+}
+
+async function fireLongPress(cx, cy) {
+  if (!drag) return;
+  drag.timer = null;
+  drag.fired = true;                    // pointerup must not also tap or swipe
+  completeRing();
+  const r = screen.getBoundingClientRect();
+  const p = toPt(cx, cy, r);
+  await postGesture('/api/long_press',
+    {x: p.x, y: p.y, seconds: LONG_PRESS_SECONDS}, cx - r.left, cy - r.top);
+}
+
+screen.addEventListener('pointerdown', (ev) => {
+  if (!points) return;
+  screen.setPointerCapture(ev.pointerId);
+  drag = { x: ev.clientX, y: ev.clientY, t: Date.now(), timer: null, fired: false };
+  if (!inputEnabled || phoneBusy()) return;
+  const r = screen.getBoundingClientRect();
+  showRing(ev.clientX - r.left, ev.clientY - r.top);
+  drag.timer = setTimeout(() => fireLongPress(ev.clientX, ev.clientY), LONG_PRESS_MS);
+});
+
+screen.addEventListener('pointermove', (ev) => {
+  if (!drag || drag.fired || !drag.timer) return;
+  // Past the same 8px that already separates a tap from a swipe: it's a drag.
+  // Stamp when the drag actually STARTS (this fires exactly once, the timer is
+  // gone after cancelHold): timing it from pointerdown counted the dwell too,
+  // so press-hesitate-flick went out as a 0.4s or clamped 0.5s drag with no
+  // inertia — and the 400ms long-press ring invites exactly that dwell.
+  if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) >= 8) {
+    drag.moveT = Date.now();
+    cancelHold();
+  }
+});
+
+screen.addEventListener('pointercancel', () => { cancelHold(); drag = null; });
+
+screen.addEventListener('pointerup', async (ev) => {
+  if (!drag || !points) return;
+  cancelHold();
+  if (drag.fired) { drag = null; return; }   // already sent; send nothing more
+  const start = drag; drag = null;
+  const r = screen.getBoundingClientRect();
+  showDot(start.x - r.left, start.y - r.top, inputEnabled && !busyLabel);
+  if (!inputEnabled) return;
+  if (phoneBusy()) return;  // aimed at a screen the long action is about to change
+  const moved = Math.hypot(ev.clientX - start.x, ev.clientY - start.y);
+  if (moved < 8) {
+    const p = toPt(start.x, start.y, r);
+    await postGesture('/api/tap', p, start.x - r.left, start.y - r.top);
+  } else {
+    const a = toPt(start.x, start.y, r), b = toPt(ev.clientX, ev.clientY, r);
+    // Cap at 0.5s: iOS pages the home screen only on quick flicks. Measured
+    // from the 8px crossing, falling back to the press for a drag so fast no
+    // pointermove landed in between.
+    const seconds = Math.min(Math.max((Date.now() - (start.moveT || start.t)) / 1000, 0.1), 0.5);
+    showSwipeEcho(start.x - r.left, start.y - r.top, ev.clientX - r.left, ev.clientY - r.top);
+    await postGesture('/api/swipe', {x1:a.x, y1:a.y, x2:b.x, y2:b.y, seconds},
+                      start.x - r.left, start.y - r.top);
+  }
+});
+
+// ---- mouse wheel over the phone scrolls the phone ---------------------------
+// Deltas accumulate while a swipe is in flight (one at a time, like flushKeys),
+// so fast wheeling becomes one bigger swipe instead of a queue of laggy ones.
+// A long slow drag buys distance the hard way and carries NO iOS inertia: at
+// 45% of a screen per ~0.7s round trip, sustained wheeling topped out near
+// 0.64 screens/s. Inertia scales with release speed, not drag length, so past
+// a real flick's worth of travel the same request goes further by ending
+// sooner. needs device check: a synthetic swipe that is too short or too fast
+// is swallowed in silence (see GESTURES — Back at 45%/0.25s did nothing while
+// 91%/0.6s worked every time), so this is one constant to walk back.
+// The travel cap is a fraction of the screen and the swipe is anchored at
+// mid-height, so anything past 0.5 puts the endpoint OFF the screen: at 0.6 on
+// a 390x844 phone a hard trackpad spin ended at y=-84. 0.45 is the measured
+// shipped value and leaves a 5% margin. Distance was never the lever anyway —
+// inertia scales with release SPEED, so WHEEL_FLICK_SECONDS is what buys the
+// travel.
+const WHEEL_MAX_TRAVEL = 0.45;  // needs device check
+const WHEEL_FLICK_SECONDS = 0.15;
+// Below this much travel the swipe stays a 0.25s drag: a short hop is meant to
+// nudge a list a little, and inertia there would overshoot what was asked for.
+const WHEEL_FLICK_MIN_PT = 150;  // needs device check
+let wheelAcc = 0;
+let wheelBusy = false;
+async function flushWheel() {
+  if (wheelBusy || !wheelAcc || !points || !inputEnabled) return;
+  const delta = wheelAcc; wheelAcc = 0;
+  wheelBusy = true;
+  try {
+    const cx = points.width / 2, cy = points.height / 2;
+    const dist = Math.min(Math.max(Math.abs(delta) * 0.7, 30),
+                          points.height * WHEEL_MAX_TRAVEL);
+    const dy = delta > 0 ? -dist : dist;   // wheel down = content moves up
+    const seconds = dist > WHEEL_FLICK_MIN_PT ? WHEEL_FLICK_SECONDS : 0.25;
+    // points -> px; the wheel's swipe is anchored at mid-height and capped at
+    // WHEEL_MAX_TRAVEL (<= 0.5, pinned by a test), so the endpoint is always on
+    // screen and needs no clamping of its own. `rect`, not `r`: `r` is the
+    // fetch response two lines down.
+    const rect = screen.getBoundingClientRect();
+    const ex = rect.width / 2;
+    showSwipeEcho(ex, rect.height / 2, ex, (cy + dy) / points.height * rect.height);
+    const r = await fetch('/api/swipe', {method:'POST', headers:JSON_HDR, body: JSON.stringify(
+      {x1: cx, y1: cy, x2: cx, y2: cy + dy, seconds})});
+    await reportNotSent(r, 'scroll');
+  } catch (e) {
+    showHint('控制面板连接中断，滚动未发送。');
+  } finally {
+    wheelBusy = false;
+    if (wheelAcc) flushWheel();
+  }
+}
+screen.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  if (!points || !inputEnabled) return;
+  if (phoneBusy()) { wheelAcc = 0; return; }
+  wheelAcc += ev.deltaY;
+  flushWheel();
+}, {passive: false});
+
+// ---- keyboard: type on your keyboard, characters go to the phone -----------
+let keyBuf = '';
+let keyBusy = false;
+const ARROW_KEYS = {
+  ArrowLeft: '\uE012', ArrowRight: '\uE014',
+  ArrowUp: '\uE013', ArrowDown: '\uE015',
+  Delete: '\uE017',
+  Home: '\uE011', End: '\uE010',
+  PageUp: '\uE00E', PageDown: '\uE00F'
+};
+const NUMPAD_MAP = {
+  Decimal: '.', Divide: '/', Multiply: '*', Subtract: '-', Add: '+', Separator: ','
+};
+let arrowBuf = [];
+let arrowBusy = false;
+async function flushKeys() {
+  if (keyBusy || !keyBuf) return;
+  const text = keyBuf; keyBuf = '';
+  keyBusy = true;
+  try {
+    const r = await fetch('/api/type', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({text})});
+    await reportNotSent(r, text.length === 1 ? '1 character'
+                                             : text.length + ' characters');
+  } catch (e) {
+    showHint('Lost the link to the viewer (' + text.length + ' not sent).');
+  } finally {
+    keyBusy = false;
+    if (keyBuf) flushKeys();   // send what queued up while we were busy
+    else if (enterPending) fireEnter();   // the Enter that waited for this text
+  }
+}
+// Enter = Send. Queued behind the key buffer so the characters typed just
+// before it land first: flushKeys is async and may already be in flight, so
+// the Enter waits for the buffer to drain rather than racing it.
+let enterPending = false;
+async function sendEnter() {
+  enterPending = true;
+  if (keyBuf || keyBusy) { flushKeys(); return; }   // drained → flushKeys fires it
+  await fireEnter();
+}
+async function fireEnter() {
+  if (!enterPending) return;
+  enterPending = false;
+  try {
+    const r = await fetch('/api/enter', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    await reportNotSent(r, 'Enter');
+    if (r.ok) {
+      const j = await r.json();
+      if (j.sent) { showHint('已发送。'); schedulePhoneRefresh(); }
+    }
+  } catch (e) {
+    showHint('控制面板连接中断，回车未发送。');
+  }
+}
+async function sendArrowKey(key) {
+  if (keyBuf) flushKeys();
+  arrowBuf.push(key);
+  if (arrowBusy) return;
+  arrowBusy = true;
+  try {
+    while (arrowBuf.length) {
+      const next = arrowBuf.shift();
+      const r = await fetch('/api/key', {method:'POST', headers:JSON_HDR,
+                                body: JSON.stringify({key: next})});
+      // Stop the drain on the first refusal instead of firing the rest at a
+      // phone that just said no: half-applied caret navigation leaves the
+      // cursor somewhere nobody asked for, which is worse than not moving it.
+      if (!r.ok) { await reportNotSent(r, 'a key'); break; }
+    }
+  } catch (e) {
+    showHint('控制面板连接中断，按键未发送。');
+  } finally {
+    arrowBusy = false;
+    arrowBuf.length = 0;
+  }
+}
+// Longest edge of a pasted PC image before it goes to the phone. A UI/transport
+// number, not a device one: 手机屏幕s are ~1200px wide and iMessage
+// recompresses attachments, so anything larger is base64 for nothing.
+const IMAGE_PASTE_MAX_PX = 1600;
+let pendingImageB64 = null;  // the last Ctrl+V image, until Send image uses it
+document.getElementById('btn-img-send').onclick = async () => {
+  const to = document.getElementById('text-to').value.trim();
+  const text = document.getElementById('text-msg').value;
+  if (!to) { showHint('请先填写联系人。'); return; }
+  if (!pendingImageB64) { showHint('请先在页面中按 Ctrl+V 粘贴图片。'); return; }
+  const btn = document.getElementById('btn-img-send');
+  btn.disabled = true; btn.textContent = '正在发送…';
+  try {
+    await withBusy('正在发送', async () => {
+      const r = await fetch('/api/send-image', {method:'POST', headers:JSON_HDR,
+        body: JSON.stringify({to, text, image_b64: pendingImageB64})});
+      const j = await r.json();
+      showHint(j.ok ? '图片已发送给 ' + to + '.' : (j.error || '无法确认发送结果，请查看最近发送。'));
+      if (j.ok) { pendingImageB64 = null; btn.hidden = true; document.getElementById('text-msg').value = ''; }
+    });
+  } catch (e) { showHint('发送失败。'); }
+  finally { btn.disabled = !inputEnabled; btn.textContent = '发送图片'; }
+  loadSent(); renderContactChips();
+};
+document.getElementById('btn-img-from-phone').onclick = async () => {
+  // Same shape as copyScreenImage: hand ClipboardItem the fetch PROMISE so the
+  // write keeps its user activation. A 404 (no image on the phone) rejects.
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      'image/png': fetch('/api/clipboard-image?t=' + Date.now()).then(r => {
+        if (!r.ok) throw new Error('no image'); return r.blob(); })
+    })]);
+    showHint('手机图片已复制到电脑剪贴板，可直接粘贴。');
+  } catch (e) {
+    showHint('手机剪贴板没有图片，或当前浏览器不支持写入图片。');
+  }
+};
+async function downscaleToJpegB64(file, maxPx) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxPx / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+window.addEventListener('paste', async (ev) => {
+  if (ovOpen) return;
+  if (!inputEnabled || phoneBusy()) return;
+  if (ev.target.closest('input,textarea,[contenteditable]')) return;
+  const imgFile = ev.clipboardData &&
+    Array.from(ev.clipboardData.files || []).find(f => /^image\/(png|jpeg)$/.test(f.type));
+  if (imgFile) {
+    // A PC screenshot (Win+Shift+S). Downscaled here so a 4K capture is not
+    // a multi-MB base64 POST through one WDA request; iMessage recompresses
+    // anyway. Lands on the phone's clipboard, not in a field: the human then
+    // long-presses the compose bar on the phone and taps Paste.
+    ev.preventDefault();
+    showHint('正在将图片复制到手机剪贴板…');
+    try {
+      const b64 = await downscaleToJpegB64(imgFile, IMAGE_PASTE_MAX_PX);
+      const r = await fetch('/api/clipboard-image', {method:'POST', headers:JSON_HDR,
+                                                     body: JSON.stringify({image_b64: b64})});
+      const j = r.ok ? await r.json() : null;
+      if (j && j.ok) {
+        pendingImageB64 = b64;
+        const sendImg = document.getElementById('btn-img-send');
+        sendImg.hidden = false; sendImg.disabled = !inputEnabled;
+        showHint('图片已复制到手机剪贴板（' + Math.round(j.bytes / 1024) +
+                 ' KB）。长按手机输入框选择粘贴，或在发送信息区域点击发送图片。');
+      } else {
+        showHint('图片粘贴失败' + (j && j.error ? ': ' + j.error : '.'));
+      }
+    } catch (e) {
+      showHint('图片粘贴失败.');
+    }
+    return;
+  }
+  const text = ev.clipboardData ? ev.clipboardData.getData('text') : '';
+  if (!text) return;
+  ev.preventDefault();
+  const box = document.getElementById('paste-text');
+  if (box) box.value = text;
+  try {
+    const r = await fetch('/api/type', {method:'POST', headers:JSON_HDR,
+                                        body: JSON.stringify({text})});
+    if (r.ok) {
+      showHint('已输入手机（' + text.length + ' 个字符）。');
+    } else {
+      showHint('粘贴失败，请先选中手机上的输入框。');
+    }
+  } catch (e) {
+    showHint('粘贴失败。');
+  }
+});
+window.addEventListener('keydown', (ev) => {
+  if (ovOpen) {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeOverlay(); }
+    return;
+  }
+  // The hotkeys sit ABOVE the focus guard on purpose: only the four GESTURES
+  // buttons blur themselves (ev.detail > 0), so btn-home, btn-shot, every chip
+  // and every debug row KEEP focus after a mouse click, and a map placed below
+  // the guard would silently do nothing until you clicked the phone — which
+  // sends a TAP. That is the same bug test_gesture_buttons_give_focus_back_to_
+  // the_phone was written for. Ctrl+Shift combos have no native meaning inside
+  // a textarea, so sitting above the guard steals nothing from the paste box.
+  if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey) {
+    // A held combo auto-repeats keydown, and an auto-repeat is never a second
+    // deliberate gesture. Ctrl+Shift+B reaches g-back -> edgeSwipe, and edge
+    // swipes never set busyLabel, so phoneBusy() cannot swallow the repeats:
+    // holding it half a second past intent lands 2-3 unwanted Back
+    // navigations on the real phone (a ~0.6s swipe, the rest 409'd by
+    // _ACTION_WAIT). No repeating key could reach a gesture before this map
+    // existed — a held mouse button does not repeat clicks.
+    if (ev.repeat) return;
+    // Shift+S and not Shift+C: the C combo is DevTools inspect-element in
+    // Chrome/Edge, a page cannot cancel it, and the viewer opens in whatever
+    // the default browser is. This one runs even with the link down —
+    // /api/screenshot falls back to the `ios screenshot` subprocess and
+    // btn-shot is never hidden, so it is exactly the broken-link day you most
+    // want to show someone the screen — hence it sits above !inputEnabled too.
+    if (ev.key === 'S' || ev.key === 's') { ev.preventDefault(); copyScreenImage(); return; }
+    // Shift+H and Shift+B, never the bare Ctrl+H (Chrome's History): a
+    // muscle-memory miss here presses Home on a real phone. These two DRIVE
+    // the phone, so they re-check inputEnabled themselves now that the map is
+    // above the global guard; both buttons already carry their own
+    // phoneBusy/withBusy guards, which .click() inherits.
+    if (ev.key === 'H' || ev.key === 'h') {
+      ev.preventDefault();
+      if (inputEnabled) document.getElementById('btn-home').click();
+      return;
+    }
+    if (ev.key === 'B' || ev.key === 'b') {
+      ev.preventDefault();
+      if (inputEnabled) document.getElementById('g-back').click();
+      return;
+    }
+  }
+  // Ctrl+V is deliberately absent: the window paste listener above already
+  // handles it with these same guards, and a preventDefault here would
+  // suppress the paste event and kill that working path.
+  if (!inputEnabled) return;
+  if (ev.target.closest('input,textarea,button,select,[tabindex]')) return;     // typing in the paste box stays local
+  if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'c' || ev.key === 'C')) {
+    if (!window.getSelection().toString()) {
+      ev.preventDefault();
+      const btn = document.getElementById('btn-clip-from-phone');
+      if (btn) btn.click();
+      return;
+    }
+  }
+  // Enter while typing INTO THE PHONE means Send, like the page's own boxes:
+  // a bare Enter goes to /api/enter, which taps the Send button when one is on
+  // screen and types a Return otherwise. Shift+Enter and Ctrl+Enter are the
+  // newline, so this check sits ABOVE the modifier bail-out that keeps other
+  // Ctrl combos for the browser.
+  if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey) && !ev.metaKey && !ev.altKey) {
+    if (phoneBusy()) { ev.preventDefault(); return; }
+    ev.preventDefault();
+    keyBuf += '\n';
+    flushKeys();
+    return;
+  }
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;   // keep browser shortcuts
+  if (phoneBusy()) { ev.preventDefault(); return; }    // keys aimed at the pre-action screen
+  const arrow = ARROW_KEYS[ev.key];
+  if (arrow) {
+    ev.preventDefault();
+    sendArrowKey(arrow);
+    return;
+  }
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    sendEnter();
+    return;
+  }
+  let ch = null;
+  if (ev.key === 'Backspace') ch = '\b';
+  else if (NUMPAD_MAP[ev.key]) ch = NUMPAD_MAP[ev.key];
+  else if (ev.key.length === 1) ch = ev.key;           // letters, digits, space, emoji-less symbols
+  else if (ev.code && /^Numpad\d$/.test(ev.code)) ch = ev.code.slice(6);
+  if (ch === null) return;
+  ev.preventDefault();
+  keyBuf += ch;
+  flushKeys();
+});
+
+const JSON_HDR = {'Content-Type':'application/json'};
+document.getElementById('btn-stop').onclick = async () => {
+  const j = await getJSON('/api/stop', {method:'POST', headers:JSON_HDR,
+                                        body: JSON.stringify({stop: !stopped})});
+  stopped = j.stopped; renderStop();
+};
+// Walking to page 1 holds the phone for seconds, and _ACTION_WAIT is 2s, so
+// without the busy label every click during it comes back 409. An unlabelled
+// freeze is what makes someone click again in the first place.
+//
+// It must NOT go through gesturePost: that starts with a phoneBusy() guard, and
+// withBusy has just set busyLabel, so the post would refuse its own label and
+// silently do nothing. Guard first, then set the label, then send.
+document.getElementById('btn-home').onclick = () => {
+  if (phoneBusy()) return;   // something else already holds the phone
+  return withBusy('正在返回主屏幕', async () => {
+    const r = await fetch('/api/home', {method:'POST', headers:JSON_HDR, body:'{}'});
+    if (r.ok) { schedulePhoneRefresh(); return; }
+    const j = await r.json().catch(() => ({}));
+    showHint(j.error || (r.status === 409
+      ? 'Phone is busy — that gesture was dropped.'
+      : 'Could not go home.'));
+  });
+};
+document.getElementById('btn-unlock').onclick = async () => {
+  const btn = document.getElementById('btn-unlock');
+  btn.disabled = true; btn.textContent = '正在解锁…';
+  // 11s from a fresh lock, 20-30s after a deep sleep (WDA stalls on the first
+  // call). The pane has to hold a label for that whole window.
+  await withBusy('正在解锁', async () => {
+    try {
+      const r = await fetch('/api/unlock', {method:'POST', headers:JSON_HDR, body:'{}'});
+      const j = await r.json();
+      showHint(j.ok ? '已解锁。' : (j.error || '解锁失败。'));
+      schedulePhoneRefresh();   // lock state is the whole point of this button
+    } catch (e) { showHint('解锁失败。'); }
+  });
+  btn.disabled = false; btn.textContent = '解锁';
+};
+document.getElementById('btn-lock').onclick = async () => {
+  const btn = document.getElementById('btn-lock');
+  btn.disabled = true; btn.textContent = '正在锁屏…';
+  try {
+    const r = await fetch('/api/lock', {method:'POST', headers:JSON_HDR, body:'{}'});
+    const j = await r.json();
+    // Right after an unlock, iOS's grace period can time this out while the
+    // screen still turns off — surface the error but don't dramatize it.
+    showHint(j.ok ? '已锁屏。' : (j.error || '锁屏失败。'));
+    schedulePhoneRefresh();   // lock state is the whole point of this button
+  } catch (e) { showHint('锁屏失败。'); }
+  btn.disabled = false; btn.textContent = '锁屏';
+};
+document.getElementById('btn-shot').onclick = () => {
+  const a = document.createElement('a');
+  a.href = '/api/screenshot?t=' + Date.now(); a.download = 'phone.png'; a.click();
+};
+
+// Pull the runnable command out of a doctor fix line, if it names one.
+function fixCommand(fix) {
+  const s = String(fix || '');
+  const tick = s.match(/`([^`]+)`/);
+  if (tick) return tick[1];
+  const run = s.match(/[Rr]un:?\s+([^()]+?)(?:\s{3,}|\(|$)/);
+  if (run) return run[1].trim().replace(/[.,]$/, '');
+  const known = s.match(/(phone-harness [a-z-]+|npm install -g [\w-]+|scripts[\\/]lock_ports\.ps1)/);
+  return known ? known[1] : null;
+}
+
+// The checks re-run themselves while anything fails, then stop. They must:
+// launch.py opens this page IMMEDIATELY and brings the link up in a background
+// thread, so the first run always lands mid bring-up and its red result used to
+// stick until someone clicked Refresh. They must also STOP once green — a full
+// run is ~2s of go-ios subprocesses plus a screenshot, so polling it forever
+// would fight the live stream for the phone.
+const DOCTOR_RETRY_MS = [3000, 3000, 5000, 8000, 15000, 30000];
+let doctorTimer = null;
+let doctorTries = 0;
+function scheduleDoctor(failing) {
+  clearTimeout(doctorTimer);
+  doctorTimer = null;
+  if (!failing) { doctorTries = 0; return; }
+  const wait = DOCTOR_RETRY_MS[Math.min(doctorTries, DOCTOR_RETRY_MS.length - 1)];
+  doctorTries++;
+  doctorTimer = setTimeout(loadDoctor, wait);
+}
+
+// True while up() is in flight, per /api/status. Starts true because at page
+// load a bring-up is essentially always running; the first status poll (a
+// second or so later) corrects it if this viewer was started on its own.
+let linkStarting = true;
+let sawIdleFail = false;
+let checksAutoOpened = false;
+let setupNeeded = false;
+let setupAppDir = '';
+async function loadDoctor() {
+  const el = document.getElementById('doctor');
+  el.innerHTML = '<div class="dim">正在检查…</div>';
+  try {
+    const results = await getJSON('/api/doctor');
+    const cmds = results.map(r => (r.ok ? null : fixCommand(r.fix)));
+    const failing = results.filter(r => !r.ok);
+    const passing = results.filter(r => r.ok);
+    // Fails first (they must never be pushed toward the clipped edge), 5 of
+    // them expanded with fix text, the rest as compact one-liners so every
+    // failure is VISIBLE even in the 10/10 worst case. Line clamps in CSS
+    // bound each card's height, so the 88vh panel provably fits.
+    const CAP = 5;
+    const expanded = failing.slice(0, CAP);
+    const compact = failing.slice(CAP, CAP + 12);
+    const overflowCount = failing.length - expanded.length - compact.length;
+    const failRows = expanded.map(r => {
+      const i = results.indexOf(r);
+      return `
+      <div class="check bad">
+        <span class="mark">未通过</span>
+        <span class="body">
+          <span class="name">${escapeHtml(zhCheck(r.name))}</span>
+          <span class="detail">${escapeHtml(zhCheck(r.detail))}</span>
+          ${r.ok || !r.fix ? '' : `<span class="fix">处理方法：${r.fix}${cmds[i] ? `<button class="copy-btn" data-i="${i}">⧉ 复制</button>` : ''}</span>`}</span>
+      </div>`;
+    }).join('');
+    const compactRows = compact.map(r => `
+      <div class="check bad compact">
+        <span class="mark">未通过</span>
+        <span class="body"><span class="name">${escapeHtml(zhCheck(r.name))}</span><span class="detail">${escapeHtml(zhCheck(r.detail))}</span></span>
+      </div>`).join('');
+    const passRows = passing.map(r => `
+      <div class="check ok">
+        <span class="mark">通过</span>
+        <span class="body"><span class="name">${escapeHtml(zhCheck(r.name))}</span><span class="detail">${escapeHtml(zhCheck(r.detail))}</span></span>
+      </div>`).join('');
+    const footer = overflowCount > 0
+      ? `<div class="dim">+${overflowCount} more failing. Run \`phone-harness doctor\`</div>`
+      : '';
+    // Mid bring-up the fix lines say "Run: phone-harness up" — which is exactly
+    // what IS running. Say so rather than let the panel give stale advice.
+    const banner = (linkStarting && failing.length)
+      ? '<div class="dim">正在建立连接，检查将自动重新运行。</div>'
+      : '';
+    el.innerHTML = banner + failRows + compactRows + passRows + footer;
+    el.querySelectorAll('.copy-btn').forEach(b => b.onclick = async () => {
+      await navigator.clipboard.writeText(cmds[b.dataset.i]);
+      b.textContent = '✓ 已复制';
+      setTimeout(() => { b.textContent = '⧉ 复制'; }, 1500);
+    });
+    const lanBad = results.some(r => r.name === 'LAN exposure' && !r.ok);
+    document.getElementById('btn-lock-ports').hidden = !lanBad;
+    // The 7-day countdown must not hide inside this panel: banner it.
+    const sig = results.find(r => r.name === 'input signature (7-day)');
+    const sigBad = !!sig && !sig.ok;
+    document.getElementById('sig-banner').hidden = !sigBad;
+    if (sigBad) document.getElementById('sig-banner-text').textContent = '⏳ ' + zhCheck(sig.detail);
+    lastDoctor = results;
+    if (ovOpen === 'setup') renderSetup();   // live: steps go green as checks pass
+    if (ovOpen === 'fix-panel' && lastFixJob) renderFix(lastFixJob);  // same, for the sign wizard
+    const fails = failing.length;
+    document.getElementById('checks-dots').innerHTML = results.map(r =>
+      '<span class="dot' + (r.ok ? '' : (linkStarting ? ' wait' : ' bad')) + '"></span>').join('');
+    document.getElementById('checks-text').textContent =
+      fails ? (linkStarting ? '正在连接…'
+                            : fails + ' 项检查未通过')
+            : '全部 ' + results.length + ' 项检查通过';
+    // Auto-open once per page load, and never steal the shared overlay from a
+    // running fix job. It takes TWO consecutive failing runs with no bring-up
+    // in flight: one is how every boot legitimately starts, and popping the
+    // panel there is the noise that made this whole thing annoying. Two means
+    // the failure outlived the bring-up, which is worth someone's attention.
+    const idleFail = fails > 0 && !linkStarting;
+    if (idleFail && sawIdleFail && !checksAutoOpened && !fixRunning
+        && document.getElementById('ov').hidden) {
+      checksAutoOpened = true;
+      // A first run fails these checks BECAUSE setup is not done yet: the
+      // guided wizard is the useful thing to show, not a wall of red.
+      if (setupNeeded) { renderSetup(); openOverlay('setup', '📱 设置 iPhone'); }
+      else openOverlay('doctor', '连接诊断');
+    }
+    sawIdleFail = idleFail;
+    degradeChecksToFit();  // re-render may have restored fix text; re-fit
+    scheduleDoctor(fails > 0);
+  } catch (e) {
+    el.innerHTML = '<div class="check bad"><span class="mark">未通过</span><span class="body"><span class="name">无法连接控制面板服务</span></span></div>';
+    document.getElementById('checks-dots').innerHTML = '<span class="dot bad"></span>';
+    document.getElementById('checks-text').textContent = '无法连接控制面板';
+    sawIdleFail = false;      // a dead server is not a phone problem to pop open
+    scheduleDoctor(true);
+  }
+}
+// A manual click restarts the fast cadence, not wherever the backoff had got to.
+document.getElementById('btn-refresh').onclick = () => { doctorTries = 0; loadDoctor(); };
+document.getElementById('btn-up').onclick = async () => {
+  const btn = document.getElementById('btn-up');
+  btn.disabled = true; btn.textContent = '正在重新连接…（最多一分钟）';
+  try {
+    const r = await fetch('/api/up', {method:'POST', headers:JSON_HDR, body:'{}'});
+    const j = await r.json();
+    showHint(j.ok ? '连接已恢复。' : '重新连接失败，请查看诊断。');
+  } catch (e) { showHint('重新连接失败，请查看诊断。'); }
+  btn.disabled = false; btn.textContent = '重新连接';
+  loadDoctor();
+};
+async function lockPorts(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/lock-ports', {method:'POST', headers:JSON_HDR, body:'{}'});
+  const j = await r.json();
+  showHint(j.message || (j.ok ? '正在限制端口访问…' : 'Lock failed'));
+  setTimeout(() => { btn.disabled = false; loadDoctor(); }, 3000);
+}
+document.getElementById('btn-lock-ports').onclick = (ev) => lockPorts(ev.currentTarget);
+document.getElementById('btn-lan-lock').onclick = (ev) => lockPorts(ev.currentTarget);
+
+// ---- edge-gesture shortcuts: reliable clicks for gestures that are nearly ---
+// impossible to land by dragging on a scaled-down screenshot.
+async function edgeSwipe(x1, y1, x2, y2, seconds = 0.3) {
+  if (!points || !inputEnabled) return;
+  await gesturePost('/api/swipe', {x1, y1, x2, y2, seconds});
+}
+document.getElementById('btn-notifs').onclick = () =>       // pull from top-left
+  edgeSwipe(points.width * 0.25, 1, points.width * 0.25, points.height * 0.55);
+// Control Center pages VERTICALLY (favourites / music / home / connectivity),
+// so the pull must stop once it is open: to 0.5h it kept travelling and landed
+// on the music page every time, at 0.3s AND 0.6s — distance is the lever, not
+// speed. 0.3h opens it on the top (favourites) page. Measured on device 2026-08-20.
+document.getElementById('btn-control').onclick = () =>      // pull from top-right
+  edgeSwipe(points.width * 0.92, 1, points.width * 0.92, points.height * 0.3);
+
+// ---- paste box / clipboard: whole strings in one call (the key path is one char at a time
+// and cannot paste at all).
+document.getElementById('btn-paste-send').onclick = async () => {
+  const box = document.getElementById('paste-text');
+  const btn = document.getElementById('btn-paste-send');
+  const text = box.value;
+  if (!text) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/type', {method:'POST', headers:JSON_HDR,
+                                        body: JSON.stringify({text})});
+    if (r.ok) box.value = '';
+    else showHint('输入失败，请先选中手机上的输入框。');
+  } finally { btn.disabled = false; }
+};
+
+document.getElementById('btn-clip-to-phone').onclick = async () => {
+  const box = document.getElementById('paste-text');
+  const btn = document.getElementById('btn-clip-to-phone');
+  let text = box.value;
+  if (!text && navigator.clipboard && navigator.clipboard.readText) {
+    try { text = await navigator.clipboard.readText(); } catch (e) {}
+  }
+  if (!text) {
+    showHint('没有可复制的文字，请先输入文字或复制到电脑剪贴板。');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/clipboard', {method:'POST', headers:JSON_HDR,
+                                             body: JSON.stringify({text})});
+    if (r.ok) {
+      box.value = text;
+      showHint('已复制到手机剪贴板（' + text.length + ' 个字符）。');
+    } else {
+      showHint('无法写入手机剪贴板。');
+    }
+  } catch (e) {
+    showHint('无法写入手机剪贴板。');
+  } finally { btn.disabled = false; }
+};
+
+let screenTexts = [];
+
+// The screen as a PNG on the PC clipboard (Ctrl+Shift+S) — "show someone what
+// my phone is doing" without saving a file first. Deliberately NOT folded into
+// copyToClipboard below: that one is text-only and swallows its failure with
+// catch(e){} while still saying "Copied", and this path has a real failure mode
+// (Firefox has no clipboard.write for images) that must be reported.
+async function copyScreenImage() {
+  try {
+    // Hand ClipboardItem the PROMISE, not an awaited blob: awaiting the fetch
+    // first can lose the transient user activation the write needs.
+    await navigator.clipboard.write([new ClipboardItem({
+      'image/png': fetch('/api/screenshot?t=' + Date.now()).then(r => r.blob())
+    })]);
+    showHint('截图已复制到剪贴板，可直接粘贴。');
+  } catch (e) {
+    document.getElementById('btn-shot').click();
+    showHint('无法复制图片，已保存为 phone.png。');
+  }
+}
+
+async function copyToClipboard(text, label = 'text') {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(text); } catch (e) {}
+  }
+  const box = document.getElementById('paste-text');
+  if (box) box.value = text;
+  const snippet = text.length > 30 ? text.slice(0, 30) + '…' : text;
+  showHint('Copied ' + label + ': "' + snippet.replace(/[\r\n]+/g, ' ') + '"');
+}
+
+function renderScreenTextList(filter = '') {
+  const list = document.getElementById('screen-text-list');
+  const q = filter.trim().toLowerCase();
+  const filtered = q ? screenTexts.filter(item => item.text.toLowerCase().includes(q)) : screenTexts;
+  if (!filtered.length) {
+    list.innerHTML = '<div class="dim" style="padding:16px 0;text-align:center;">' +
+      (screenTexts.length ? '没有匹配的文字。' : '当前屏幕没有识别到文字。') +
+      '</div>';
+    return;
+  }
+  list.innerHTML = '';
+  filtered.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'stext-row';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.title = '点击复制';
+    const content = document.createElement('span');
+    content.className = 'stext-content';
+    content.textContent = item.text;
+    const meta = document.createElement('span');
+    meta.className = 'stext-meta';
+    if (item.type) {
+      const typeTag = document.createElement('span');
+      typeTag.className = 'stext-type';
+      typeTag.textContent = item.type;
+      meta.appendChild(typeTag);
+    }
+    const btn = document.createElement('button');
+    btn.className = 'sec stext-copy';
+    btn.textContent = '复制';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      copyToClipboard(item.text, 'text');
+      btn.textContent = '✓ 已复制';
+      btn.style.color = 'var(--ok)';
+      setTimeout(() => { btn.textContent = '复制'; btn.style.color = ''; }, 1200);
+    };
+    meta.appendChild(btn);
+    row.appendChild(content);
+    row.appendChild(meta);
+    row.onclick = () => {
+      copyToClipboard(item.text, 'text');
+      btn.textContent = '✓ 已复制';
+      btn.style.color = 'var(--ok)';
+      setTimeout(() => { btn.textContent = '复制'; btn.style.color = ''; }, 1200);
+    };
+    list.appendChild(row);
+  });
+}
+
+document.getElementById('screen-text-filter').oninput = (ev) => {
+  renderScreenTextList(ev.target.value);
+};
+
+document.getElementById('btn-copy-all-screen').onclick = () => {
+  if (!screenTexts.length) return;
+  const all = screenTexts.map(s => s.text).join('\n');
+  copyToClipboard(all, 'all screen text (' + screenTexts.length + ' items)');
+};
+
+async function openScreenTextPicker() {
+  const btn = document.getElementById('btn-clip-from-phone');
+  btn.disabled = true;
+  document.getElementById('screen-text-list').innerHTML = '<div class="dim" style="padding:16px 0;text-align:center;">正在识别屏幕文字…</div>';
+  openOverlay('screen-text', '📋 复制屏幕文字');
+  document.getElementById('screen-text-filter').value = '';
+  try {
+    const r = await fetch('/api/screen-text', {method:'GET', headers:JSON_HDR});
+    const j = await r.json().catch(() => ({}));
+    if (j.ok && Array.isArray(j.texts)) {
+      screenTexts = j.texts;
+      renderScreenTextList();
+      if (screenTexts.length === 1) {
+        copyToClipboard(screenTexts[0].text, 'text');
+      }
+    } else {
+      document.getElementById('screen-text-list').innerHTML = '<div class="dim" style="padding:16px 0;text-align:center;">无法读取屏幕文字。</div>';
+    }
+  } catch (e) {
+    document.getElementById('screen-text-list').innerHTML = '<div class="dim" style="padding:16px 0;text-align:center;">无法读取屏幕文字。</div>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-clip-from-phone').onclick = openScreenTextPicker;
+
+// ---- Fix input (re-sign WDA) ----------------------------------------------
+let fixRunning = false;
+const FIX_STEPS = [
+  ['p12', '创建签名身份'],
+  // "if needed" is load-bearing: the capture reads the phone before it ever
+  // prompts, so a still-valid profile skips this step and the wizard ticks it
+  // off without the human touching Sideloadly. A bare "Waiting for Sideloadly
+  // to sign" would then show ✓ over something that never happened.
+  ['waiting', '通过 Sideloadly 重新签名（如有需要）'],
+  ['captured', '从手机读取描述文件'],
+  ['signing', '重新签名 WDA（包含 .xctest）'],
+  ['up', '正在启动隧道和 WDA'],
+  ['done', '触控已连接'],
+];
+// The wizard's last line is the one the human actually asked for: after
+// Sideloadly, does the phone work? It is client-side because the checks live in
+// /api/doctor, not in the sign job, and it re-renders from loadDoctor so the
+// list finishes itself while they watch instead of stopping at "触控已连接".
+let fixOk = false;
+let lastFixJob = null;
+function fixChecksLine(job) {
+  if (job.step === 'error') return '';
+  if (!fixOk) return '<div class="fstep"><span class="m">·</span><span>全部检查通过</span></div>';
+  if (!lastDoctor.length) return '<div class="fstep on"><span class="m">▶</span><span>正在检查…</span></div>';
+  const bad = lastDoctor.filter(r => !r.ok);
+  if (!bad.length) return `<div class="fstep done"><span class="m">✓</span><span>全部 ${lastDoctor.length} 项检查通过，可以使用</span></div>`;
+  return `<div class="fstep on"><span class="m">▶</span><span>${bad.length} 项检查仍未通过 · ${zhCheck(bad[0].name)}</span></div>`;
+}
+function renderFix(job) {
+  lastFixJob = job;
+  const order = FIX_STEPS.map(s => s[0]);
+  const cur = order.indexOf(job.step);
+  const html = FIX_STEPS.map(([key, label], i) => {
+    let cls = 'fstep';
+    if (i < cur || job.step === 'done') cls += ' done';
+    else if (i === cur) cls += ' on';
+    const mark = (i < cur || job.step === 'done') ? '✓' : (i === cur ? '▶' : '·');
+    return `<div class="${cls}"><span class="m">${mark}</span><span>${label}${i === cur && job.message ? ' · ' + job.message : ''}</span></div>`;
+  }).join('');
+  const err = job.step === 'error' ? `<div class="fstep err"><span class="m">✗</span><span>${job.message}</span></div>` : '';
+  document.getElementById('fix-steps').innerHTML = html + err + fixChecksLine(job);
+}
+async function pollFix() {
+  const job = await getJSON('/api/fix-input');
+  renderFix(job);
+  if (job.running) { setTimeout(pollFix, 1000); return; }
+  fixRunning = false;
+  fixOk = job.ok === true;
+  renderFix(job);            // repaint the checks line now that it is live
+  document.getElementById('btn-fix').disabled = false;
+  document.getElementById('btn-sig-fix').disabled = false;
+  loadDoctor(); loadStatus();
+}
+async function startFixInput() {
+  fixRunning = true;
+  fixOk = false;
+  document.getElementById('btn-fix').disabled = true;
+  document.getElementById('btn-sig-fix').disabled = true;
+  openOverlay('fix-panel', '🔧 启用触控');
+  await fetch('/api/fix-input', {method:'POST', headers:JSON_HDR, body:'{}'});
+  pollFix();
+}
+document.getElementById('btn-fix').onclick = startFixInput;
+document.getElementById('btn-sig-fix').onclick = startFixInput;
+
+// ---- first-run setup wizard -------------------------------------------------
+// The human-only Apple steps, driven by the same doctor results as the checks
+// panel: each step is "done" when its named checks pass. Auto-opens instead of
+// Checks until WDA has published a session once (setup_done on /api/status).
+// Only the FIRST unfinished step shows its instructions: later steps cannot be
+// acted on yet, and a first-run user needs one next action, not five.
+const SETUP_STEPS = [
+  ['电脑工具（go-ios）', ['go-ios installed'],
+   '安装程序通常会完成此步骤。若仍未通过，请重新运行安装程序：' +
+   'sidetap.io，或在终端运行 <code>npm install -g go-ios</code>。'],
+  ['连接 iPhone 并信任电脑', ['iPhone on USB'],
+   '通过 USB 连接手机，解锁后按提示点击<b>信任</b>。若未弹出提示，' +
+   '安装免费的 <a href="https://apps.microsoft.com/detail/9np83lwlpz9k" target="_blank" rel="noopener">Apple Devices 应用</a>，再重新插拔手机。'],
+  ['启用开发者模式', ['tunnel', 'developer image (DDI)'],
+   '在 iPhone 上打开：设置 → 隐私与安全性 → 开发者模式 → 开启，手机将重新启动。' +
+   '若没有此菜单，请在终端运行 <code>ios devmode reveal</code> ' +
+   '<button class="copy-btn" data-cmd="ios devmode reveal">⧉ 复制</button>，再重新打开设置。'],
+  ['安装 WebDriverAgent', ['WDA installed (input)'],
+   '安装 <a href="https://sideloadly.io" target="_blank" rel="noopener">Sideloadly</a>，下载最新的 ' +
+   '<code>WebDriverAgentRunner-Runner-*.ipa</code>，下载地址：' +
+   '<a href="https://github.com/appium/WebDriverAgent/releases" target="_blank" rel="noopener">WDA 发布页</a> ' +
+   '，保存到 <code>%WDA_DIR%</code>，文件名为 <code>WebDriverAgent.ipa</code>。' +
+   '在 Sideloadly 中选择此 IPA 和你的 iPhone，使用 Apple ID 登录并点击 Start。' +
+   '然后在手机上打开：设置 → 通用 → VPN 与设备管理，信任对应的开发者。'],
+  ['完成触控驱动签名', ['WDA responding (input)', 'input signature (7-day)'],
+   '点击<button id="setup-fix">🔧 修复触控</button>，按提示在 Sideloadly 中点击 Start。' +
+   '免费 Apple ID 的签名有效期为 7 天，到期前需要重新签名。'],
+];
+function renderSetup() {
+  const el = document.getElementById('setup');
+  const byName = {};
+  (lastDoctor || []).forEach(r => { byName[r.name] = r.ok; });
+  const stepOk = SETUP_STEPS.map(([, names]) => names.every(n => byName[n] === true));
+  const cur = stepOk.indexOf(false);   // -1: everything green
+  const wdaDir = setupAppDir ? setupAppDir + '\\wda' : 'SideTap 安装目录下的 wda 文件夹';
+  const head = !lastDoctor
+    ? '<div class="dim">正在检查…</div>'
+    : (cur < 0 ? '<div class="sdone">✓ 设置完成，关闭此窗口后即可点击手机画面进行操作。</div>' : '');
+  el.innerHTML = head + SETUP_STEPS.map(([label, , help], i) => {
+    const mark = stepOk[i] ? '✓' : (i === cur ? '▶' : '·');
+    const cls = 'fstep' + (stepOk[i] ? ' done' : (i === cur ? ' on' : ''));
+    const showHelp = lastDoctor && i === cur;
+    return `<div class="${cls}"><span class="m">${mark}</span><span>${i + 1}. ${label}</span></div>` +
+      (showHelp ? `<div class="shelp">${help.replace('%WDA_DIR%', escapeHtml(wdaDir))}</div>` : '');
+  }).join('');
+  el.querySelectorAll('.copy-btn[data-cmd]').forEach(b => b.onclick = async () => {
+    await navigator.clipboard.writeText(b.dataset.cmd);
+    b.textContent = '✓ 已复制';
+    setTimeout(() => { b.textContent = '⧉ 复制'; }, 1500);
+  });
+  const fix = document.getElementById('setup-fix');
+  if (fix) fix.onclick = startFixInput;
+}
+document.getElementById('btn-setup').onclick = () => { renderSetup(); openOverlay('setup', '📱 设置 iPhone'); };
+
+// ---- Actions column ---------------------------------------------------------
+function pins(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+function togglePin(key, name, render) {
+  const p = pins(key);
+  const i = p.indexOf(name);
+  if (i < 0) p.push(name); else p.splice(i, 1);
+  localStorage.setItem(key, JSON.stringify(p));
+  render();
+}
+function chip(label, pinned, onUse, onPin) {
+  const b = document.createElement('button');
+  b.className = 'chip' + (pinned ? ' pinned' : '');
+  b.textContent = label;
+  const pin = document.createElement('span');
+  pin.className = 'pin';
+  pin.textContent = pinned ? '★' : '☆';
+  pin.title = pinned ? '取消固定' : '固定';
+  pin.onclick = (ev) => { ev.stopPropagation(); onPin(); };
+  b.appendChild(pin);
+  b.onclick = onUse;
+  return b;
+}
+let sendRecs = [];  // loadSent keeps this fresh
+let sentSig = null;  // last rendered /api/actions payload; skips a no-op chip rebuild
+function renderContactChips() {
+  const wrap = document.getElementById('contact-chips');
+  const pinned = pins('sidetap.pins.contacts');
+  const learned = [...new Set(sendRecs.slice().reverse()
+    .map(r => r.resolved_title || r.contact))].filter(n => !pinned.includes(n));
+  wrap.replaceChildren(...[...pinned, ...learned].slice(0, 10).map(name =>
+    chip(name, pinned.includes(name),
+      () => { document.getElementById('text-to').value = name;
+              syncReadLabel();   // the Read button names the same contact
+              document.getElementById('text-msg').focus(); },
+      () => togglePin('sidetap.pins.contacts', name, renderContactChips))));
+}
+// A count cap alone cannot bound a wrapping row: chip text varies, so 12 apps
+// wrap to five rows on one phone and four on another. The old fixed
+// max-height:150px cut row five through the middle and said nothing — half a
+// "Music" chip, which is the bare clip this column's overflow policy forbids.
+// Measure the real row height at render, keep WHOLE rows, and count out loud
+// whatever had to go. Runs once per render and on resize, never on a poll.
+function clampChips(box, moreBtn, noun) {
+  box.style.maxHeight = '';
+  if (moreBtn) moreBtn.hidden = true;
+  // Below 1100px the page scrolls and there is no height to ration. Removing
+  // chips there would carry the desktop's cut into a layout that never needed it.
+  if (window.matchMedia('(max-width:1100px)').matches) return;
+  const kids = [...box.children];
+  if (!kids.length) return;
+  const col = box.closest('.col');
+  const budget = Math.max(60, (col ? col.clientHeight : 600) * 0.28);
+  const tops = [...new Set(kids.map(k => k.offsetTop))].sort((a, b) => a - b);
+  const rowH = tops.length > 1 ? tops[1] - tops[0] : box.scrollHeight;
+  let rows = Math.max(1, Math.floor(budget / rowH));
+  // The 28% ration assumes the column HAS the room to give. When it does not,
+  // the surplus lands on #thread (flex:1 1 auto, min-height:0), which shrinks
+  // under its own chrome until the column's overflow:hidden cuts #thread-note
+  // through the middle — 31px of it gone at a 780px viewport, measured, and no
+  // "+N more" said so. Note the 28% ration alone never even fired there: it
+  // allowed 6 rows when only 5 existed, so nothing was dropped while the column
+  // ran 32px over. Shed whole rows until the column fits. These chips are the
+  // one block with an overlay escape hatch and a spoken count, so they degrade.
+  while (col && rows > 1) {
+    box.style.maxHeight = (rows * rowH) + 'px';
+    if (moreBtn) moreBtn.hidden = rows >= tops.length;   // it costs height too
+    if (col.scrollHeight <= col.clientHeight) break;
+    rows--;
+  }
+  box.style.maxHeight = '';
+  if (moreBtn) moreBtn.hidden = true;
+  const cut = tops[rows];
+  if (cut === undefined) return;          // every row already fits the budget
+  let dropped = 0;
+  kids.forEach(k => { if (k.offsetTop >= cut) { k.remove(); dropped++; } });
+  box.style.maxHeight = (rows * rowH) + 'px';
+  if (dropped && moreBtn) {
+    moreBtn.hidden = false;
+    moreBtn.textContent = '+' + dropped + ' 项更多内容 ▸';
+  }
+}
+
+let knownApps = [];
+function appChip(name, pinned) {
+  return chip(zhApp(name), pinned,
+    async (ev) => {
+      const b = ev.currentTarget; b.disabled = true; b.dataset.busy = '1';
+      try {
+        await withBusy('正在打开', async () => {
+          const r = await fetch('/api/open-app', {method:'POST', headers:JSON_HDR,
+                                                  body: JSON.stringify({name})});
+          const j = await r.json();
+          if (!j.ok) showHint(j.error || '无法打开 ' + name + '.');
+        });
+      } catch (e) { showHint('无法打开 ' + name + '.'); }
+      finally {
+        delete b.dataset.busy; b.disabled = !inputEnabled;
+        schedulePhoneRefresh();   // the front app row is now wrong either way
+      }
+    },
+    () => togglePin('sidetap.pins.apps', name, renderAppChips));
+}
+function renderAppChips() {
+  const pinned = pins('sidetap.pins.apps');
+  const order = [...pinned, ...knownApps.filter(n => !pinned.includes(n))];
+  // 24 bounds the DOM; clampChips bounds the pixels. The overlay always holds
+  // every app, so a chip the clamp drops is never an app you cannot reach.
+  document.getElementById('app-chips').replaceChildren(
+    ...order.slice(0, 24).map(n => appChip(n, pinned.includes(n))));
+  const full = document.getElementById('full-apps');
+  full.className = 'chips';
+  full.replaceChildren(...order.map(n => appChip(n, pinned.includes(n))));
+  clampChips(document.getElementById('app-chips'),
+             document.getElementById('more-apps'), 'apps');
+  updateActionAvail();
+}
+document.getElementById('more-apps').onclick = () => openOverlay('full-apps', '打开应用');
+
+// ---- Open apps: the app switcher, read over USB instead of swiped open.
+// WebDriverAgent's touches never reach the home-indicator zone (measured
+// 2026-09-04: even the plain Home flick cannot leave Settings), so the
+// switcher screen cannot be opened from here; `ios ps` joined against the
+// installed list is what it would show. A chip brings the app up, ✕ force-
+// quits it. Neither touches WDA, so neither is gated on inputEnabled — a
+// broken-link day is exactly when closing a stuck app is worth having.
+function dimNote(text) {
+  const s = document.createElement('span'); s.className = 'dim'; s.textContent = text; return s;
+}
+function runningChip(app) {
+  const b = document.createElement('button');
+  b.className = 'chip';
+  b.textContent = zhApp(app.name);
+  b.title = '切换到 ' + app.name;
+  const x = document.createElement('span');
+  x.className = 'pin';
+  x.textContent = '✕';
+  x.title = '关闭 ' + app.name;
+  x.onclick = async (ev) => {
+    ev.stopPropagation();
+    b.disabled = true;
+    try {
+      const r = await fetch('/api/close-app', {method:'POST', headers:JSON_HDR,
+                                               body: JSON.stringify({name: app.bundle_id})});
+      const j = await r.json();
+      if (!j.ok) showHint(j.error || '无法关闭 ' + app.name + '.');
+    } catch (e) { showHint('无法关闭 ' + app.name + '.'); }
+    await loadRunning();
+    schedulePhoneRefresh();               // the front app may be the one just closed
+  };
+  b.appendChild(x);
+  b.onclick = async () => {
+    if (phoneBusy()) return;
+    b.disabled = true;
+    try {
+      await withBusy('正在打开', async () => {
+        const r = await fetch('/api/open-app', {method:'POST', headers:JSON_HDR,
+                                                body: JSON.stringify({name: app.bundle_id})});
+        const j = await r.json();
+        if (!j.ok) showHint(j.error || '无法打开 ' + app.name + '.');
+        else closeOverlay();
+      });
+    } catch (e) { showHint('无法打开 ' + app.name + '.'); }
+    finally { b.disabled = false; schedulePhoneRefresh(); }
+  };
+  return b;
+}
+async function loadRunning() {
+  const box = document.getElementById('full-running');
+  box.className = 'chips';
+  box.replaceChildren(dimNote('正在读取…'));
+  try {
+    const j = await getJSON('/api/running');
+    if (!j.ok) throw new Error(j.error || 'read failed');
+    box.replaceChildren(...(j.apps.length ? j.apps.map(runningChip)
+                                          : [dimNote('没有已打开的应用。')]));
+  } catch (e) {
+    box.replaceChildren(dimNote('无法读取已打开的应用，请检查手机连接。'));
+  }
+}
+document.getElementById('btn-running').onclick = () => {
+  openOverlay('full-running', '已打开的应用');
+  loadRunning();
+};
+
+// ---- Go to page: the chips are 1..total. goto_home_page() refuses anything
+// else by design, but it still walks correctly OUT of Today View and the App
+// Library, so those two need no chip — the readout names them and any chip
+// escapes them.
+let pageSig = null;
+function renderPageChips(page) {
+  const sig = page ? page.index + '/' + page.total : 'none';
+  if (sig === pageSig) return;            // an unchanged 10s poll rebuilds nothing
+  pageSig = sig;
+  const box = document.getElementById('page-chips');
+  const now = document.getElementById('page-now');
+  // Every rebuild here changes the column's height, and it happens LONG after
+  // clampChips last measured — these chips land from the 10s /api/phone poll.
+  // That stale ration is what left #thread 12px tall holding 60px of content,
+  // with its note cut through the middle and no "+N more" to say so: the clamp
+  // had measured a column that still fit, so it broke early and never fired.
+  if (!page) {
+    now.textContent = '仅在主屏幕可用';
+    box.replaceChildren();
+    renderAppChips();                     // re-ration against the new height
+    return;
+  }
+  now.textContent = page.zone === 'today' ? '当前为今天视图'
+    : page.zone === 'app_library' ? '当前为 App 资源库'
+    : '当前第 ' + page.index + ' 页';
+  const kids = [];
+  for (let n = 1; n <= page.total; n++) {
+    const b = document.createElement('button');
+    b.className = 'chip' + (n === page.index ? ' on' : '');
+    b.textContent = n;
+    b.title = '切换到主屏幕第 ' + n;
+    b.onclick = () => walkToPage(n);
+    kids.push(b);
+  }
+  box.replaceChildren(...kids);
+  renderAppChips();                       // re-ration against the new height
+  updateActionAvail();
+}
+function walkToPage(n) {
+  if (phoneBusy()) return;                // the guard must run BEFORE withBusy
+  return withBusy('正在切换', async () => {
+    const r = await fetch('/api/page', {method:'POST', headers:JSON_HDR,
+                                        body: JSON.stringify({index:n})});
+    const j = await r.json().catch(() => ({}));
+    if (!j.ok) showHint(j.error || (r.status === 409
+      ? '手机正忙，本次切换未执行。'
+      : '无法切换到页面 ' + n + '.'));
+  }).then(() => { pageSig = null; loadPhone(); });
+}
+
+// ---- Gestures: swipes that are impractical to drag on a scaled screenshot.
+// Same edgeSwipe path the Notifs and Control buttons already use, so there is
+// no new endpoint and no new failure mode.
+// Fractions of the screen, not points: the table must not touch `points`, which
+// is null until the first /api/status lands. Every row below was measured on
+// device 2026-08-12 — a system gesture that is too SHORT or too FAST is simply
+// swallowed. Back at 0.45 width / 0.25s did nothing from Settings > General;
+// the same gesture at 0.91 width / 0.6s popped the screen every time. Do not
+// "tidy" these numbers.                             x1    y1    x2    y2   secs
+const GESTURES = {
+  'g-back':     [0,    0.5,  0.91, 0.5,  0.6 ],
+  'g-search':   [0.5,  0.26, 0.5,  0.73, 0.5 ],
+  'g-up':       [0.5,  0.35, 0.5,  0.75, 0.3 ],
+  'g-down':     [0.5,  0.75, 0.5,  0.35, 0.3 ],
+};
+// NO app-switcher button. The switcher needs a swipe that HOLDS near 45% height
+// before it lifts, and swipe() is press-move-release with nothing in between —
+// duration does not substitute for the hold. Measured twice on device
+// 2026-08-12 (0.9s and 1.4s, two different end points): the phone did not move.
+// It needs a press/pause/release action chain in wda_client first.
+// Said once, after Search, because that is the gesture whose whole point is to
+// leave a keyboard waiting on the phone.
+const GESTURE_HINTS = {'g-search': '聚焦搜索已打开，直接打字即可输入手机。'};
+Object.entries(GESTURES).forEach(([id, [fx1, fy1, fx2, fy2, secs]]) => {
+  document.getElementById(id).onclick = (ev) => {
+    if (!points) return;
+    // Clamp 1pt inside: 0 and the full height are off the swipe surface.
+    const at = (f, span) => Math.min(Math.max(f * span, 1), span - 1);
+    edgeSwipe(at(fx1, points.width), at(fy1, points.height),
+              at(fx2, points.width), at(fy2, points.height), secs);
+    // Keys only reach the phone when nothing focusable holds focus: the window
+    // keydown handler returns early on input/textarea/button/select/[tabindex].
+    // A clicked button KEEPS focus, so Search opened Spotlight and then ate
+    // every letter typed at it, and the obvious repair — click the screen —
+    // sends a TAP that closes Spotlight again. Hand focus back to the document
+    // so the very next keystroke lands on the phone.
+    // ev.detail is 0 when the click came from the keyboard (Enter/Space on a
+    // focused button); blurring there would throw a keyboard user out of the
+    // tab order, so only a real pointer click gives focus up.
+    if (ev.detail > 0) ev.currentTarget.blur();
+    if (GESTURE_HINTS[id]) showHint(GESTURE_HINTS[id]);
+  };
+});
+
+// ---- Thread: the read half of "发送信息". read_messages() has shipped
+// since the start and no human surface ever called it.
+let threadMsgs = null;
+function readLabel() {
+  const to = document.getElementById('text-to').value.trim();
+  return to ? '读取 ' + to : '读取对话';
+}
+function syncReadLabel() {
+  const b = document.getElementById('btn-read-thread');
+  if (!b.dataset.busy) b.textContent = readLabel();
+}
+// Degrade-to-fit, oldest first: a bare "last N" cap cannot bound this box
+// because bubble height depends on how long each message is. Same policy as
+// the checks panel and the sends feed, and whatever goes is counted.
+function renderThread() {
+  const list = document.getElementById('thread-list');
+  if (!threadMsgs) {
+    list.innerHTML = '<div class="dim">读取对话后，这里会显示最近的信息。</div>';
+    return;
+  }
+  if (!threadMsgs.length) {
+    list.innerHTML = '<div class="dim">此对话中没有找到信息。</div>';
+    return;
+  }
+  let keep = threadMsgs.slice();
+  const draw = () => {
+    const kids = [];
+    if (keep.length < threadMsgs.length) {
+      const d = document.createElement('div');
+      d.className = 'dim';
+      d.style.cssText = 'font-size:11.5px;flex:0 0 auto';
+      d.textContent = '↑ ' + (threadMsgs.length - keep.length) + ' 条更早的信息未显示';
+      kids.push(d);
+    }
+    keep.forEach(m => {
+      const b = document.createElement('div');
+      b.className = 'bub ' + (m.from_me ? 'me' : 'them');
+      b.textContent = m.text;          // textContent, never innerHTML: this is
+      kids.push(b);                    // message text off the phone
+    });
+    list.replaceChildren(...kids);
+  };
+  draw();
+  let guard = 60;
+  while (list.scrollHeight > list.clientHeight + 1 && keep.length > 1 && guard--) {
+    keep.shift();
+    draw();
+  }
+}
+document.getElementById('text-to').addEventListener('input', syncReadLabel);
+// Feedback for this button goes UNDER this button. showHint() renders in
+// #click-hint at the bottom of the phone pane — two columns away — and a
+// "Type a contact first." over there read as the button doing nothing
+// (reported 2026-08-14). The default note comes back after the hold.
+const THREAD_NOTE_DEFAULT = document.getElementById('thread-note').textContent;
+let threadNoteTimer = null;
+function threadNote(msg) {
+  const n = document.getElementById('thread-note');
+  n.textContent = msg;
+  n.style.color = 'var(--warn)';
+  clearTimeout(threadNoteTimer);
+  threadNoteTimer = setTimeout(() => {
+    n.textContent = THREAD_NOTE_DEFAULT;
+    n.style.color = '';
+  }, 6000);
+}
+document.getElementById('btn-read-thread').onclick = async () => {
+  const to = document.getElementById('text-to').value.trim();
+  if (!to) {
+    threadNote('请先填写上方联系人，也可点击联系人标签填入。');
+    document.getElementById('text-to').focus();
+    return;
+  }
+  if (phoneBusy()) { threadNote('手机正忙，请稍后再试。'); return; }
+  const btn = document.getElementById('btn-read-thread');
+  btn.disabled = true; btn.dataset.busy = '1'; btn.textContent = '正在读取…';
+  try {
+    // ~10s: it opens Messages, searches the name and opens the thread. An
+    // unlabelled freeze that long is what makes a human click again.
+    await withBusy('正在读取', async () => {
+      const r = await fetch('/api/read-thread', {method:'POST', headers:JSON_HDR,
+                                                 body: JSON.stringify({contact:to, limit:30})});
+      const j = await r.json().catch(() => ({}));
+      if (!j.ok) {
+        threadNote(j.error || (r.status === 409
+          ? '手机正忙，本次读取未执行。'
+          : '无法读取此对话。'));
+        return;
+      }
+      threadMsgs = j.messages || [];
+      renderThread();
+    });
+  } catch (e) { threadNote('无法读取此对话。'); }
+  finally { delete btn.dataset.busy; btn.disabled = !inputEnabled; syncReadLabel(); }
+};
+renderThread();
+// ---- Pull photos: server-side background job, polled until done -----------
+// Deliberately NOT withBusy/phoneBusy: the pull is AFC file reads over USB,
+// never a gesture, so the phone stays fully usable while it runs — and a
+// first-ever pull of a big camera roll can take minutes, which is why the
+// server runs it in a thread instead of holding this fetch open.
+function photosNote(t) { document.getElementById('photos-note').textContent = t; }
+function renderPhotoJob(j) {
+  if (j.running) { photosNote(j.message ? '正在导入 ' + j.message + '…' : '正在导入…'); return; }
+  if (j.ok === null) return;                       // never run this session
+  if (j.ok) {
+    photosNote('已导入 ' + j.pulled + ' 个新文件 · 跳过 ' + j.skipped + ' 个已同步文件 → ' + j.dest
+               + (j.message ? '（部分文件失败：' + j.message + ')' : ''));
+  } else {
+    photosNote('导入失败：' + (j.message || '请确认手机已连接并解锁'));
+  }
+}
+document.getElementById('btn-photos').onclick = async () => {
+  const btn = document.getElementById('btn-photos');
+  btn.disabled = true; btn.textContent = '正在导入…';
+  try {
+    let j = await (await fetch('/api/pull-photos', {method:'POST', headers:JSON_HDR, body:'{}'})).json();
+    renderPhotoJob(j);
+    while (j.running) {
+      await new Promise(r => setTimeout(r, 1500));
+      j = await (await fetch('/api/pull-photos')).json();
+      renderPhotoJob(j);
+    }
+  } catch (e) { photosNote('导入失败，无法连接控制面板。'); }
+  finally { btn.disabled = false; btn.textContent = '导入电脑'; }
+};
+document.getElementById('btn-text-send').onclick = async () => {
+  const to = document.getElementById('text-to').value.trim();
+  const message = document.getElementById('text-msg').value;
+  if (!to || !message.trim()) { showHint('请填写联系人和信息内容。'); return; }
+  const btn = document.getElementById('btn-text-send');
+  btn.disabled = true; btn.textContent = '正在发送…'; btn.dataset.busy = '1';
+  // A send drives Messages for several seconds; same freeze, same treatment.
+  try {
+    await withBusy('正在发送', async () => {
+      const r = await fetch('/api/text', {method:'POST', headers:JSON_HDR,
+                                          body: JSON.stringify({to, message})});
+      const j = await r.json();
+      showHint(j.ok ? '已发送给 ' + to + '.'
+                    : (j.error || '无法确认发送结果，请查看最近发送。'));
+      if (j.ok) document.getElementById('text-msg').value = '';
+    });
+  } catch (e) { showHint('发送失败。'); }
+  finally { delete btn.dataset.busy; btn.disabled = !inputEnabled; btn.textContent = '发送'; }
+  loadSent(); renderContactChips();
+};
+// ---- Enter sends; Shift/Ctrl+Enter breaks the line ------------------------
+// Both boxes are "type it, send it" fields, so a bare Enter means the button.
+// Shift+Enter inserts its own newline, but Ctrl+Enter inserts NOTHING in
+// Chromium (measured), so that one is typed in by hand. ANY modifier takes the
+// newline path: a send drives a real phone, so no combo may fire one by
+// surprise. The disabled check is what keeps Enter from double-sending while a
+// send is already in flight — the button is the flag for that (updateActionAvail).
+function enterSends(boxId, btnId) {
+  const box = document.getElementById(boxId);
+  box.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.isComposing) return;   // IME: Enter picks a candidate
+    if (ev.shiftKey) return;                            // the browser's own newline
+    ev.preventDefault();                                // else a newline lands before the send
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) {
+      box.setRangeText('\n', box.selectionStart, box.selectionEnd, 'end');
+      return;
+    }
+    const btn = document.getElementById(btnId);
+    if (!btn.disabled) btn.click();
+  });
+}
+enterSends('text-msg', 'btn-text-send');
+enterSends('paste-text', 'btn-paste-send');
+// Action controls need the input driver; grey them out with a reason otherwise.
+function updateActionAvail() {
+  const tip = inputEnabled ? '' : '触控未连接，请查看诊断';
+  // A send/open in flight owns its own disabled state until it finishes —
+  // the 5s status poll must not re-enable a button mid-request (double-send risk).
+  ['btn-text-send', 'btn-console-run', 'btn-read-thread',
+   ...Object.keys(GESTURES)].forEach(id => {
+    const el = document.getElementById(id);
+    // Restore the button's own tooltip instead of blanking it: this runs on
+    // every 5s /api/status tick, so writing '' while input is up wiped the
+    // markup's hint a few seconds after page load — which silently ate the
+    // "(Ctrl+Shift+B)" hotkey hint on g-back, the only place it is advertised.
+    if (el && !el.dataset.busy) {
+      if (el.dataset.tip === undefined) el.dataset.tip = el.title;
+      el.disabled = !inputEnabled; el.title = tip || el.dataset.tip;
+    }
+  });
+  // #full-apps holds the same chips in the overlay; they drive the phone too.
+  document.querySelectorAll('#app-chips .chip, #full-apps .chip, #page-chips .chip')
+    .forEach(c => { if (!c.dataset.busy) { c.disabled = !inputEnabled; c.title = tip; } });
+}
+// ---- Debug column (collapsed by default; state persists) ---------------------
+const debugBody = document.getElementById('debug-body');
+function renderDebug(open) {
+  debugBody.hidden = !open;
+  document.getElementById('debug-blurb').hidden = open;
+  document.getElementById('debug-toggle').textContent = open ? '调试 ▾' : '调试 ▸';
+  localStorage.setItem('sidetap.debug.open', open ? '1' : '');
+}
+document.getElementById('debug-toggle').onclick = () => renderDebug(debugBody.hidden);
+renderDebug(localStorage.getItem('sidetap.debug.open') === '1');
+
+const consoleIn = document.getElementById('console-in');
+let consoleHist = pins('sidetap.console.hist');
+let histIdx = consoleHist.length;
+async function runConsole() {
+  if (document.getElementById('btn-console-run').dataset.busy) return;
+  const line = consoleIn.value.trim();
+  if (!line) return;
+  consoleHist.push(line);
+  if (consoleHist.length > 50) consoleHist.shift();
+  localStorage.setItem('sidetap.console.hist', JSON.stringify(consoleHist));
+  histIdx = consoleHist.length;
+  const out = document.getElementById('console-out');
+  out.hidden = false;
+  const entry = document.createElement('div');
+  entry.textContent = '> ' + line + '\n…';
+  out.prepend(entry);
+  while (out.children.length > 3) out.lastElementChild.remove();
+  const full = document.getElementById('full-console');
+  const fullEntry = entry.cloneNode(true);
+  full.prepend(fullEntry);
+  while (full.children.length > 6) full.lastElementChild.remove();
+  consoleIn.value = '';
+  const runBtn = document.getElementById('btn-console-run');
+  runBtn.disabled = true; runBtn.dataset.busy = '1';
+  try {
+    const r = await fetch('/api/console', {method:'POST', headers:JSON_HDR,
+                                           body: JSON.stringify({line})});
+    const j = await r.json();
+    entry.textContent = fullEntry.textContent = '> ' + line + '\n' +
+      (j.ok ? JSON.stringify(j.result === undefined ? null : j.result, null, 1)
+            : '✗ ' + j.error);
+  } catch (e) { entry.textContent = fullEntry.textContent = '> ' + line + '\n✗ ' + e; }
+  finally {
+    delete runBtn.dataset.busy; runBtn.disabled = !inputEnabled;
+    // Entry heights are text-dependent, so the count cap alone can clip the
+    // oldest entry invisibly in a short column. Drop old entries (keeping the
+    // newest) until the box genuinely fits — render-once, no polling.
+    while (out.children.length > 1 && out.scrollHeight > out.clientHeight + 1)
+      out.lastElementChild.remove();
+    const more = document.getElementById('more-console');
+    more.hidden = full.children.length <= out.children.length;
+    more.textContent = '+' + (full.children.length - out.children.length) + ' 条更早记录 ▸';
+  }
+}
+document.getElementById('btn-console-run').onclick = runConsole;
+document.getElementById('more-console').onclick = () => openOverlay('full-console', '调试输出');
+consoleIn.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') runConsole();
+  else if (ev.key === 'ArrowUp') {
+    if (histIdx > 0) { histIdx--; consoleIn.value = consoleHist[histIdx]; }
+    ev.preventDefault();
+  } else if (ev.key === 'ArrowDown') {
+    histIdx = Math.min(histIdx + 1, consoleHist.length);
+    consoleIn.value = consoleHist[histIdx] || '';
+    ev.preventDefault();
+  }
+});
+</script>
+</body>
+</html>
